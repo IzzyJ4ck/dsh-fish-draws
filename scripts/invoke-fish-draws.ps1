@@ -31,7 +31,6 @@ param(
     [int]$TimeoutSecondsPerImage = 900,
 
     [string]$ComfyBaseUrl = "http://127.0.0.1:8188",
-    [string]$ComfyLauncher = "E:\ComfyUI\run_nvidia_gpu.bat",
     [string]$ComfyOutputRoot = "E:\ComfyUI\ComfyUI\output",
     [string]$StrataConfig = "E:\Strata\strata-iq3_s.json"
 )
@@ -163,16 +162,6 @@ function Test-ComfyOnline {
     }
 }
 
-function Wait-ComfyOnline {
-    param([int]$TimeoutSec = 180)
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-ComfyOnline) { return $true }
-        Start-Sleep -Seconds 2
-    }
-    return $false
-}
-
 function Test-ComfyIdle {
     try {
         $queue = Invoke-RestMethod -Uri "$ComfyBaseUrl/queue" -Method Get -TimeoutSec 10 -ErrorAction Stop
@@ -257,11 +246,7 @@ try {
     if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "Workflow template not found: $templatePath" }
     if (-not (Test-Path -LiteralPath $StrataConfig -PathType Leaf)) { throw "Strata config not found: $StrataConfig" }
 
-    if (-not (Test-ComfyOnline)) {
-        if (-not (Test-Path -LiteralPath $ComfyLauncher -PathType Leaf)) { throw "ComfyUI launcher not found: $ComfyLauncher" }
-        [void](Start-Process -FilePath $ComfyLauncher -WorkingDirectory (Split-Path -Parent $ComfyLauncher) -WindowStyle Hidden)
-        if (-not (Wait-ComfyOnline -TimeoutSec 180)) { throw "ComfyUI did not become ready within 180 seconds." }
-    }
+    if (-not (Test-ComfyOnline)) { throw "ComfyUI is offline at $ComfyBaseUrl. Start it as a separate DSH-managed background job, wait for /system_stats, then run this helper again." }
     if (-not (Wait-ComfyIdle -TimeoutSec 30)) { throw "ComfyUI already has another running or queued job." }
     if (-not (Free-ComfyModels)) { throw "ComfyUI was not confirmed idle before the VRAM handoff." }
 
