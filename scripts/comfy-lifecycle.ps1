@@ -12,7 +12,7 @@ param(
 
     [string]$ComfyBaseUrl = "http://127.0.0.1:8188",
     [string]$ExpectedPython = "E:\ComfyUI\python_embeded\python.exe",
-    [string]$StatePath = (Join-Path (Split-Path -Parent $PSScriptRoot) ".runtime\comfy-owner.json")
+    [string]$StatePath = "E:\ComfyUI\.fish-draws-runtime\comfy-owner.json"
 )
 
 $ErrorActionPreference = "Stop"

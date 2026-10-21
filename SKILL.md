@@ -50,6 +50,8 @@ Immediately after a newly started server becomes ready, register the exact liste
 
 Registration records the PID, executable path, and process start time. If registration fails, report the error and stop before invoking the generation helper. Never register a ComfyUI instance that was already online when the request began; such an instance is user-owned.
 
+Lifecycle state is stored at `E:\ComfyUI\.fish-draws-runtime\comfy-owner.json`, inside the DSH workspace. Run `Register`, `Touch`, the generation helper, and `Watch` with the session's normal `workspace-write` sandbox. Do not request `danger-full-access` merely because the scripts themselves are read from `C:\Users\26283\.dsh\skills`; they only write runtime state and generated output under `E:\ComfyUI`.
+
 When ComfyUI was already online, make a short `-Action Touch` call before invoking the helper. It refreshes the timer only if a valid fish-draws ownership record already exists and otherwise reports `managed: false`, leaving user-owned instances untouched.
 
 The process-owning calls are deliberately separate:
@@ -106,6 +108,7 @@ The script accepts 1–32 images. It generates them sequentially with different 
 - Never start a second ComfyUI instance when `/system_stats` already responds.
 - Never register or close a ComfyUI process that was already online when the request began.
 - Do not close a managed ComfyUI process directly after generation. Arm the configured lifecycle watcher after the complete batch.
+- Do not request broader sandbox permissions for lifecycle bookkeeping. Its mutable state belongs inside `E:\ComfyUI`; report a genuine unrelated permission failure instead of preemptively escalating.
 - Never call Strata recursively from the script or from another tool call.
 - Never print, copy, or hardcode the Strata API key. The helper reads it from the local Strata configuration in memory.
 - Never resize Strata while it reports an active or queued request.
