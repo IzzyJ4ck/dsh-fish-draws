@@ -1,0 +1,96 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "qwen-image-2.1-UC-Q8_0_2.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": { "title": "Qwen-Image-2.1 GGUF" }
+  },
+  "2": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": ["1", 0]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": { "title": "Qwen Image 2.1 Cache" }
+  },
+  "3": {
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Qwen3-VL text encoder" }
+  },
+  "4": {
+    "inputs": {
+      "prompt": "__PROMPT__",
+      "negative_prompt": "",
+      "resolution": 1024,
+      "clip": ["3", 0]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": { "title": "Encode expanded prompt" }
+  },
+  "5": {
+    "inputs": {
+      "width": 1920,
+      "height": 1080,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "Canvas" }
+  },
+  "6": {
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": { "title": "Qwen-Image-2.1 VAE" }
+  },
+  "7": {
+    "inputs": {
+      "seed": 42,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["2", 0],
+      "positive": ["4", 0],
+      "negative": ["4", 1],
+      "latent_image": ["5", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "Sample" }
+  },
+  "8": {
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["6", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "Decode" }
+  },
+  "9": {
+    "inputs": {
+      "image": ["8", 0],
+      "width": 1920,
+      "height": 1080,
+      "x": 0,
+      "y": 4
+    },
+    "class_type": "ImageCrop",
+    "_meta": { "title": "Crop padded VAE output to requested size" }
+  },
+  "10": {
+    "inputs": {
+      "filename_prefix": "fish-draws/image",
+      "images": ["9", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save PNG" }
+  }
+}
