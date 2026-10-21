@@ -15,7 +15,8 @@ Generate local images through the deterministic helper script in this skill. Do 
 4. Use the ratio's default resolution unless the user explicitly requested another supported size.
 5. Ensure ComfyUI is online by following **ComfyUI service startup** below. Starting ComfyUI and running the helper must be separate tool calls.
 6. Only after `GET http://127.0.0.1:8188/system_stats` succeeds, run `scripts/invoke-fish-draws.ps1` once for the whole batch. Pass the rewritten English prompt, original request, aspect ratio, count, and optional seed. Do not run the script once per image.
-7. Parse the script's JSON result. Show the expanded prompt, ratio, dimensions, seed for each image, and every returned PNG inline in the DSH conversation.
+7. Parse the script's JSON result. If `comfy_managed` is true, arm the idle shutdown watcher once after the complete batch as described below. Never arm it per image.
+8. Show the expanded prompt, ratio, dimensions, seed for each image, and every returned PNG inline in the DSH conversation.
 
 ## ComfyUI service startup
 
@@ -41,12 +42,43 @@ Store the returned background job ID. Do not use `Start-Process`, `run_nvidia_gp
 
 After starting it, use short foreground probe calls to poll `/system_stats` every 3 seconds for at most 180 seconds. The server is ready only when that endpoint returns successfully. If the background job exits before readiness or the deadline expires, read that exact job's output, report the startup error, and stop. Do not invoke the helper and do not resize Strata.
 
+Immediately after a newly started server becomes ready, register the exact listening Python process in a short foreground call:
+
+```powershell
+& "C:\Users\26283\.dsh\skills\fish-draws\scripts\comfy-lifecycle.ps1" -Action Register
+```
+
+Registration records the PID, executable path, and process start time. If registration fails, report the error and stop before invoking the generation helper. Never register a ComfyUI instance that was already online when the request began; such an instance is user-owned.
+
+When ComfyUI was already online, make a short `-Action Touch` call before invoking the helper. It refreshes the timer only if a valid fish-draws ownership record already exists and otherwise reports `managed: false`, leaving user-owned instances untouched.
+
 The process-owning calls are deliberately separate:
 
 1. The background `pwsh` call owns the ComfyUI Python server.
 2. A later foreground `pwsh` call runs `invoke-fish-draws.ps1` only after readiness is confirmed.
 
 Health probes are short control calls; never combine the server command and helper command into one PowerShell process.
+
+## ComfyUI shutdown policy
+
+The configured policy is `Idle` with a 10-minute timeout:
+
+- A user-owned ComfyUI instance is never closed.
+- A fish-draws-managed instance stays online during the entire requested batch.
+- The idle timer starts or resets only after the helper finishes cleanup and Strata restoration.
+- A new request refreshes the timer. A running or queued ComfyUI job also postpones shutdown.
+- The watcher validates the recorded PID, executable path, and process start time before closing anything. A stale or mismatched record must never be used to stop a process.
+
+After the complete batch, only when the helper returns `comfy_managed: true`, make a dedicated DSH `pwsh` tool call with `run_in_background: true`:
+
+```text
+command: & 'C:\Users\26283\.dsh\skills\fish-draws\scripts\comfy-lifecycle.ps1' -Action Watch -ShutdownMode Idle -IdleMinutes 10
+run_in_background: true
+```
+
+Do not wait ten minutes in the conversation. Store the watcher job ID and continue displaying the generated results. Starting another watcher after a later managed batch is safe: all watchers read the same refreshed activity record, and only the watcher that obtains the fish-draws mutex can close the verified process.
+
+The lifecycle helper also supports `-ShutdownMode Keep` and `-ShutdownMode Immediate`, but use `Idle -IdleMinutes 10` unless the user explicitly changes the policy.
 
 ## Script invocation
 
@@ -72,7 +104,8 @@ The script accepts 1–32 images. It generates them sequentially with different 
 
 - Never launch ComfyUI from inside `invoke-fish-draws.ps1`. If the service is offline, the helper must fail fast and the skill must start it through a separate DSH-managed background tool call.
 - Never start a second ComfyUI instance when `/system_stats` already responds.
-- Leave the ComfyUI service process running after the task unless the user explicitly asks to stop it; unload models after the batch as usual.
+- Never register or close a ComfyUI process that was already online when the request began.
+- Do not close a managed ComfyUI process directly after generation. Arm the configured lifecycle watcher after the complete batch.
 - Never call Strata recursively from the script or from another tool call.
 - Never print, copy, or hardcode the Strata API key. The helper reads it from the local Strata configuration in memory.
 - Never resize Strata while it reports an active or queued request.

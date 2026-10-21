@@ -70,6 +70,7 @@ if (($Width % 8) -ne 0 -or ($Height % 8) -ne 0) {
 }
 
 $templatePath = Join-Path (Split-Path -Parent $PSScriptRoot) "assets\qwen21-t2i-api.json"
+$lifecyclePath = Join-Path $PSScriptRoot "comfy-lifecycle.ps1"
 $jobId = [guid]::NewGuid().ToString("N")
 $startedAt = Get-Date
 $sampleWidth = [int]([Math]::Ceiling($Width / 16.0) * 16)
@@ -92,6 +93,7 @@ $result = [ordered]@{
     images = @()
     seeds = @()
     strata_restored = $false
+    comfy_managed = $false
     cleanup = "not_started"
     error = $null
     duration_seconds = $null
@@ -157,6 +159,17 @@ function Test-ComfyOnline {
     try {
         [void](Invoke-RestMethod -Uri "$ComfyBaseUrl/system_stats" -Method Get -TimeoutSec 5 -ErrorAction Stop)
         return $true
+    } catch {
+        return $false
+    }
+}
+
+function Touch-ManagedComfyActivity {
+    if (-not (Test-Path -LiteralPath $lifecyclePath -PathType Leaf)) { return $false }
+    try {
+        $activityJson = & $lifecyclePath -Action Touch -ComfyBaseUrl $ComfyBaseUrl
+        $activity = $activityJson | ConvertFrom-Json
+        return ($activity.managed -eq $true)
     } catch {
         return $false
     }
@@ -247,6 +260,7 @@ try {
     if (-not (Test-Path -LiteralPath $StrataConfig -PathType Leaf)) { throw "Strata config not found: $StrataConfig" }
 
     if (-not (Test-ComfyOnline)) { throw "ComfyUI is offline at $ComfyBaseUrl. Start it as a separate DSH-managed background job, wait for /system_stats, then run this helper again." }
+    $result.comfy_managed = Touch-ManagedComfyActivity
     if (-not (Wait-ComfyIdle -TimeoutSec 30)) { throw "ComfyUI already has another running or queued job." }
     if (-not (Free-ComfyModels)) { throw "ComfyUI was not confirmed idle before the VRAM handoff." }
 
@@ -348,6 +362,7 @@ finally {
             $exitCode = 1
         }
     }
+    if ($result.comfy_managed) { [void](Touch-ManagedComfyActivity) }
     if ($hasMutex) { [void]$mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
