@@ -1,36 +1,81 @@
 ---
 name: fish-draws
-description: Use when the user asks DSH to draw or generate one or more images locally. Rewrites the request with the already-running Strata model, ensures the persistent ComfyUI service is online, hands VRAM from Strata to ComfyUI, generates the complete requested batch with Qwen-Image-2.1, unloads ComfyUI models, restores Strata, and displays the resulting PNG files.
+description: Generate or edit one or more images locally with Qwen-Image-2.1 through ComfyUI, including exact output dimensions, one-to-six reference images, Strata prompt expansion, VRAM handoff, and managed ComfyUI lifecycle.
 ---
 
 # Fish Draws
 
-Generate local images through the deterministic helper script in this skill. Do not assemble ComfyUI graphs or call Strata's HTTP generation API yourself.
+Use the deterministic scripts in this skill. Do not assemble ComfyUI graphs manually and never make a nested HTTP request back to Strata: the currently running Strata agent performs prompt rewriting itself before its expert cache is reduced.
 
-## Required order
+## Route the request
 
-1. Read [references/prompt-rewriter.md](references/prompt-rewriter.md).
-2. While answering with the currently running Strata model, rewrite the user's image request according to that reference. Do this before invoking any shell tool. Never make a nested request back to Strata.
-3. Resolve the aspect ratio. Preserve an explicit ratio from the user; otherwise choose one using the reference.
-4. Use the ratio's default resolution unless the user explicitly requested another supported size.
-5. Ensure ComfyUI is online by following **ComfyUI service startup** below. Starting ComfyUI and running the helper must be separate tool calls.
-6. Only after `GET http://127.0.0.1:8188/system_stats` succeeds, run `scripts/invoke-fish-draws.ps1` once for the whole batch. Pass the rewritten English prompt, original request, aspect ratio, count, and optional seed. Do not run the script once per image.
-7. Parse the script's JSON result. If `comfy_managed` is true, arm the idle shutdown watcher once after the complete batch as described below. Never arm it per image.
-8. Show the expanded prompt, ratio, dimensions, seed for each image, and every returned PNG inline in the DSH conversation.
+- No reference image: text-to-image. Read [references/system-prompt-t2i.md](references/system-prompt-t2i.md).
+- One to six reference images: image editing. Read [references/system-prompt-edit.md](references/system-prompt-edit.md).
+- More than six reference images: stop and ask the user to reduce the set.
+
+Generate a requested batch in one helper invocation. `Count` is the number of outputs, not the number of reference images.
+
+## Text-to-image order
+
+1. Rewrite the request with the current Strata model according to `system-prompt-t2i.md`. Parse its `rewritten_prompt` and `wh_ratio`.
+2. Use the exact default size associated with `wh_ratio`. If the user gave exact dimensions, those dimensions take priority.
+3. Ensure ComfyUI is online using the separate startup procedure below.
+4. Invoke `scripts/invoke-fish-draws.ps1` once with `-TaskMode T2I`, the rewritten prompt, and either `-AspectRatio` or exact target dimensions.
+
+The approved ratio table is implemented in the scripts. Supported values are `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `5:4`, `4:5`, `16:10`, `10:16`, `16:9`, `9:16`, `2:1`, `1:2`, `21:9`, `9:21`, `3:1`, and `1:3`. Never approximate a ratio that is not in this table; ask for exact width and height.
+
+## Image-editing order
+
+Resolve size before rewriting because the edit instruction may need outpainting semantics.
+
+1. Resolve every attachment to a local path in original upload order.
+2. Identify a content canvas only when the user specifies one. Otherwise the first upload is the content canvas. A canvas selection changes semantic image order; a size-reference selection does not.
+3. Call `scripts/resolve-fish-draws-size.ps1` in a short foreground tool call. This call only reads image metadata.
+4. If `oversize_confirmation_required` is true, show the user the target size, sample size, and safe envelope. Do not continue unless the user explicitly confirms the risky size. Confirmation permits `-AllowOversize`; it never permits silent resizing.
+5. Rewrite the edit request with the current Strata model according to `system-prompt-edit.md`. Give it the resolver's normalized input order, `outpainting_required`, and `outpainting_direction` as orchestration context. Do not put pixel sizes or renderer parameters in the rewritten prompt.
+6. Ensure every normalized reference is described. With multiple inputs use every `<imageN>` tag exactly according to the resolver's `input_mapping`; with one input use no tag.
+7. Keep the resolver's `request_id` for the whole user request. Ensure ComfyUI is online, then invoke `invoke-fish-draws.ps1` with that value as `RetryGroupId`, `AttemptNumber 1`, and the resolver's `input_images`, target size, sample size, and size source.
+
+Size precedence is deterministic:
+
+1. Exact user width and height.
+2. Original dimensions of a user-selected size-reference image.
+3. A supported ratio mapped through the default table.
+4. Original dimensions of the first uploaded reference image.
+
+Natural size terms count as explicit ratios when unambiguous: square/avatar/album cover → `1:1`; landscape/desktop wallpaper/widescreen/video thumbnail/PPT → `16:9`; portrait/phone wallpaper/story/reel → `9:16`; poster → `2:3`; ID photo/Xiaohongshu → `3:4`; tablet/iPad → `4:3`; panorama → `2:1`; cinematic/ultrawide → `21:9`. For an unmapped term or unsupported ratio, ask for exact dimensions.
+
+Example resolver calls:
+
+```powershell
+$images = @("C:\path\canvas.png", "C:\path\reference.jpg")
+& "C:\Users\26283\.dsh\skills\fish-draws\scripts\resolve-fish-draws-size.ps1" `
+  -InputImages $images `
+  -AspectRatio "16:9" `
+  -CanvasImage $images[0]
+```
+
+```powershell
+& "C:\Users\26283\.dsh\skills\fish-draws\scripts\resolve-fish-draws-size.ps1" `
+  -InputImages $images `
+  -SizeReferenceImage $images[1]
+```
+
+Do not use reference preprocessing dimensions as delivery dimensions. Every edit uses an independent custom latent canvas and is cropped after decoding to the exact target.
 
 ## ComfyUI service startup
 
-Treat ComfyUI as a persistent local service. Leave its process running after generation; the helper unloads its models so the idle service should not retain meaningful model VRAM.
+Starting ComfyUI and running the generation helper must be separate DSH tool calls.
 
-First make a short foreground `pwsh` tool call that probes:
+First probe in a short foreground call:
 
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:8188/system_stats" -Method Get -TimeoutSec 5
 ```
 
-If the probe succeeds, do not start another server. Continue to the helper invocation.
+If it succeeds, do not start another server. Run `comfy-lifecycle.ps1 -Action Touch`; this refreshes a valid fish-draws ownership record and leaves user-owned instances untouched.
 
-If the probe fails, make a dedicated DSH `pwsh` tool call with `run_in_background: true`. This call starts only ComfyUI and must not invoke the fish-draws helper:
+If it fails, start only ComfyUI with a dedicated DSH `pwsh` call using `run_in_background: true`:
 
 ```text
 command: & 'E:\ComfyUI\python_embeded\python.exe' -s 'E:\ComfyUI\ComfyUI\main.py' --windows-standalone-build
@@ -38,93 +83,100 @@ workdir: E:\ComfyUI
 run_in_background: true
 ```
 
-Store the returned background job ID. Do not use `Start-Process`, `run_nvidia_gpu.bat`, or a nested shell to launch the server: the DSH tool must own the long-running Python process so its output and lifetime remain observable.
+Do not use `Start-Process`, a batch launcher, or a nested shell. Poll `/system_stats` every three seconds for at most 180 seconds. If the owned background job exits or readiness times out, report its output and stop before resizing Strata.
 
-After starting it, use short foreground probe calls to poll `/system_stats` every 3 seconds for at most 180 seconds. The server is ready only when that endpoint returns successfully. If the background job exits before readiness or the deadline expires, read that exact job's output, report the startup error, and stop. Do not invoke the helper and do not resize Strata.
-
-Immediately after a newly started server becomes ready, register the exact listening Python process in a short foreground call:
+After a newly started server becomes ready, register the exact listener:
 
 ```powershell
 & "C:\Users\26283\.dsh\skills\fish-draws\scripts\comfy-lifecycle.ps1" -Action Register
 ```
 
-Registration records the PID, executable path, and process start time. If registration fails, report the error and stop before invoking the generation helper. Never register a ComfyUI instance that was already online when the request began; such an instance is user-owned.
+Never register a server that was already online when the request began; it is user-owned. Lifecycle state remains under `E:\ComfyUI\.fish-draws-runtime` so normal workspace permission is sufficient.
 
-Lifecycle state is stored at `E:\ComfyUI\.fish-draws-runtime\comfy-owner.json`, inside the DSH workspace. Run `Register`, `Touch`, the generation helper, and `Watch` with the session's normal `workspace-write` sandbox. Do not request `danger-full-access` merely because the scripts themselves are read from `C:\Users\26283\.dsh\skills`; they only write runtime state and generated output under `E:\ComfyUI`.
+## Generation invocation
 
-When ComfyUI was already online, make a short `-Action Touch` call before invoking the helper. It refreshes the timer only if a valid fish-draws ownership record already exists and otherwise reports `managed: false`, leaving user-owned instances untouched.
-
-The process-owning calls are deliberately separate:
-
-1. The background `pwsh` call owns the ComfyUI Python server.
-2. A later foreground `pwsh` call runs `invoke-fish-draws.ps1` only after readiness is confirmed.
-
-Health probes are short control calls; never combine the server command and helper command into one PowerShell process.
-
-## ComfyUI shutdown policy
-
-The configured policy is `Idle` with a 10-minute timeout:
-
-- A user-owned ComfyUI instance is never closed.
-- A fish-draws-managed instance stays online during the entire requested batch.
-- The idle timer starts or resets only after the helper finishes cleanup and Strata restoration.
-- A new request refreshes the timer. A running or queued ComfyUI job also postpones shutdown.
-- The watcher validates the recorded PID, executable path, and process start time before closing anything. A stale or mismatched record must never be used to stop a process.
-
-After the complete batch, only when the helper returns `comfy_managed: true`, make a dedicated DSH `pwsh` tool call with `run_in_background: true`:
-
-```text
-command: & 'C:\Users\26283\.dsh\skills\fish-draws\scripts\comfy-lifecycle.ps1' -Action Watch -ShutdownMode Idle -IdleMinutes 10
-run_in_background: true
-```
-
-Do not wait ten minutes in the conversation. Store the watcher job ID and continue displaying the generated results. Starting another watcher after a later managed batch is safe: all watchers read the same refreshed activity record, and only the watcher that obtains the fish-draws mutex can close the verified process.
-
-The lifecycle helper also supports `-ShutdownMode Keep` and `-ShutdownMode Immediate`, but use `Idle -IdleMinutes 10` unless the user explicitly changes the policy.
-
-## Script invocation
-
-Use a separate foreground Windows PowerShell or PowerShell 7 tool call. Quote user-controlled strings as literal arguments; never interpolate them into executable code.
+Text-to-image example:
 
 ```powershell
+$retryGroupId = [guid]::NewGuid().ToString("N")
 & "C:\Users\26283\.dsh\skills\fish-draws\scripts\invoke-fish-draws.ps1" `
+  -TaskMode T2I `
   -ExpandedPrompt $expandedPrompt `
   -OriginalPrompt $originalPrompt `
   -AspectRatio "16:9" `
+  -RetryGroupId $retryGroupId `
+  -AttemptNumber 1 `
   -Count 1
 ```
 
-Optional parameters:
+Image-edit example after parsing the resolver JSON:
 
-- `-Seed N`: reproduce a result. Without it, the script chooses a random base seed.
-- `-Width N -Height N`: use only when the user explicitly requests a custom size. Both must be supplied, be divisible by 8, and be no greater than 2048.
-- `-Steps N`: default 25; use a different value only when the user explicitly asks or a later calibration changes the default.
-
-The script accepts 1–32 images. It generates them sequentially with different seeds while keeping ComfyUI's models loaded, then unloads once after the complete batch.
-
-## Non-negotiable safety rules
-
-- Never launch ComfyUI from inside `invoke-fish-draws.ps1`. If the service is offline, the helper must fail fast and the skill must start it through a separate DSH-managed background tool call.
-- Never start a second ComfyUI instance when `/system_stats` already responds.
-- Never register or close a ComfyUI process that was already online when the request began.
-- Do not close a managed ComfyUI process directly after generation. Arm the configured lifecycle watcher after the complete batch.
-- Do not request broader sandbox permissions for lifecycle bookkeeping. Its mutable state belongs inside `E:\ComfyUI`; report a genuine unrelated permission failure instead of preemptively escalating.
-- Never call Strata recursively from the script or from another tool call.
-- Never print, copy, or hardcode the Strata API key. The helper reads it from the local Strata configuration in memory.
-- Never resize Strata while it reports an active or queued request.
-- Treat only HTTP success plus Strata response `status: ok` as a successful VRAM handoff.
-- On timeout or error, interrupt/delete the exact ComfyUI prompt and wait for the queue to become idle before unloading.
-- If ComfyUI cannot be confirmed idle and unloaded, leave Strata squeezed and clearly warn the user. Restoring Strata while ComfyUI may still own VRAM risks an out-of-memory failure.
-- Do not unload ComfyUI between images in the same requested batch.
-- Do not claim restoration succeeded unless the helper reports `strata_restored: true`.
-
-## Displaying results
-
-For every path in `images`, render a Markdown image using its absolute path:
-
-```markdown
-![Generated image](E:/ComfyUI/ComfyUI/output/fish-draws/...png)
+```powershell
+& "C:\Users\26283\.dsh\skills\fish-draws\scripts\invoke-fish-draws.ps1" `
+  -TaskMode Edit `
+  -InputImages @($sizePlan.input_images) `
+  -ExpandedPrompt $expandedPrompt `
+  -OriginalPrompt $originalPrompt `
+  -TargetWidth $sizePlan.target_width `
+  -TargetHeight $sizePlan.target_height `
+  -SampleWidth $sizePlan.sample_width `
+  -SampleHeight $sizePlan.sample_height `
+  -SizeSource $sizePlan.size_source `
+  -RetryGroupId $sizePlan.request_id `
+  -AttemptNumber 1 `
+  -Count 1
 ```
 
-Also report the expanded prompt so the run can be reproduced. If the script returns `ok: false`, report its `error`, `cleanup`, and `strata_restored` fields without hiding partial results.
+Append `-AllowOversize` only after explicit confirmation. Use `-Acceleration Fast` when the user asks for speed or a draw/selection batch. The helper automatically switches to Fast when `Count` is greater than one. Default mode is Balanced; default steps are 40.
 
+The helper validates prompt tags, creates unique temporary ComfyUI input copies, submits the complete batch sequentially, unloads once, restores Strata, deletes only its own temporary inputs, and verifies every saved PNG's dimensions.
+
+## Attempt limit
+
+A user request may run the generation helper at most three times total, including the initial attempt. This limit applies whether the helper reports an execution error or the produced image fails the requested visual edit on inspection.
+
+- Create one `RetryGroupId` per user request and reuse it unchanged. For edits, use the resolver's `request_id`; do not rerun the resolver to obtain a fresh ID merely to bypass the limit.
+- Use `AttemptNumber 1`, then 2, then 3. Never repeat or skip a number.
+- A retry must change something justified by the observed failure, such as correcting a transport bug or refining an ambiguous edit instruction. Never blindly resubmit the same graph and prompt.
+- `Count` is one batch attempt, regardless of how many outputs it contains. Prefer a requested selection batch over repeated single-image calls.
+- After attempt 3, stop. Report the three outcomes and the remaining diagnosis; ask the user how to proceed instead of invoking the helper again.
+
+The helper persists each retry group under `E:\ComfyUI\.fish-draws-runtime\retry-attempts` and rejects a fourth invocation even across separate DSH tool calls. Its result reports `retry_group_id`, `attempt_number`, `max_attempts`, and `attempts_remaining`.
+
+## Shutdown policy
+
+- User-owned ComfyUI: never close it.
+- Skill-managed ComfyUI: after the complete batch, arm one ten-minute idle watcher.
+- Never arm a watcher per output image.
+
+Use a separate background tool call only when the generation result says `comfy_managed: true`:
+
+```text
+command: & 'C:\Users\26283\.dsh\skills\fish-draws\scripts\comfy-lifecycle.ps1' -Action Watch -ShutdownMode Idle -IdleMinutes 10
+workdir: E:\ComfyUI
+run_in_background: true
+```
+
+## Safety invariants
+
+- Never resize Strata before prompt expansion and edit-size resolution are complete.
+- Never run two fish-draws jobs concurrently.
+- Never restore Strata while ComfyUI may still be sampling or retaining models.
+- Never unload ComfyUI between images in one batch.
+- Never change `RetryGroupId`, rerun the resolver, or start a new helper sequence to evade the three-attempt limit for the same user request.
+- Never report success unless every delivered PNG passed exact-dimension validation.
+- Never claim Strata restoration unless `strata_restored` is true.
+- Never hardcode or display the Strata API key; the helper reads it from the existing Strata config.
+- Do not edit the user's UI workflow files.
+
+## Display results
+
+Show every path in `images` inline with its absolute path. Also report:
+
+- original and expanded prompts;
+- normalized input mapping for edits;
+- size source, target size, internal sample size, and outpainting direction;
+- acceleration mode, steps, and each seed;
+- ComfyUI cleanup and Strata restoration status.
+
+If `ok` is false, report `error`, `cleanup`, `strata_restored`, and any already validated partial outputs without hiding them.
