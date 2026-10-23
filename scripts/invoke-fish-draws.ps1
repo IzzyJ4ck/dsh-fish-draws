@@ -35,10 +35,16 @@ param(
 
     [switch]$AllowOversize,
 
-    [string]$RetryGroupId = "",
+    [Alias("RetryGroupId")]
+    [string]$ExecutionId = "",
 
-    [ValidateRange(1, 3)]
-    [int]$AttemptNumber = 1,
+    [Alias("AttemptNumber")]
+    [ValidateRange(1, 4)]
+    [int]$TechnicalAttempt = 1,
+
+    [string]$PreflightManifestPath = "",
+
+    [switch]$CalibrationRun,
 
     [ValidateRange(1, 32)]
     [int]$Count = 1,
@@ -93,6 +99,7 @@ if ($TargetWidth -eq 0) {
     $SizeSource = "explicit"
 }
 
+if ($Count -gt 1) { $Acceleration = "Fast" }
 $canvas = Get-FishDrawsSampleCanvas -TargetWidth $TargetWidth -TargetHeight $TargetHeight
 if ($SampleWidth -eq 0) {
     $SampleWidth = $canvas.sample_width
@@ -100,17 +107,20 @@ if ($SampleWidth -eq 0) {
 } elseif ($SampleWidth -ne $canvas.sample_width -or $SampleHeight -ne $canvas.sample_height) {
     throw "Sample dimensions must equal the target dimensions rounded up to multiples of 16: $($canvas.sample_width)x$($canvas.sample_height)."
 }
-if (-not $canvas.safe -and -not $AllowOversize) {
-    throw "Sampling canvas ${SampleWidth}x${SampleHeight} exceeds the verified safe envelope (2048 per side and 2,400,000 pixels). Ask the user to confirm, then retry with -AllowOversize, or use a smaller target."
+$safetyProfileName = Get-FishDrawsSafetyProfileName -TaskMode $TaskMode -InputCount $InputImages.Count -Acceleration $Acceleration -Count $Count
+$safetyProfile = Get-FishDrawsSafetyProfile -ProfileName $safetyProfileName
+$canvasSafe = Test-FishDrawsCanvasAgainstProfile -Canvas $canvas -Profile $safetyProfile
+if (-not $canvasSafe -and -not $AllowOversize) {
+    throw "Sampling canvas ${SampleWidth}x${SampleHeight} exceeds safety profile '$safetyProfileName' ($($safetyProfile.max_sample_width)x$($safetyProfile.max_sample_height), $($safetyProfile.max_sample_pixels) pixels). Ask the user to confirm, then retry with -AllowOversize, or use a smaller target."
 }
-if ($Count -gt 1) { $Acceleration = "Fast" }
-if ([string]::IsNullOrWhiteSpace($RetryGroupId)) {
-    if ($AttemptNumber -ne 1) { throw "RetryGroupId is required when AttemptNumber is greater than one." }
-    $RetryGroupId = [guid]::NewGuid().ToString("N")
-} elseif ($RetryGroupId -notmatch '^[a-fA-F0-9]{32}$') {
-    throw "RetryGroupId must be a 32-character hexadecimal GUID without separators."
+if (-not $PSBoundParameters.ContainsKey("ReserveMiB") -and $null -ne $safetyProfile.reserve_mib) { $ReserveMiB = [int]$safetyProfile.reserve_mib }
+if ([string]::IsNullOrWhiteSpace($ExecutionId)) {
+    if ($TechnicalAttempt -ne 1) { throw "ExecutionId is required when TechnicalAttempt is greater than one." }
+    $ExecutionId = [guid]::NewGuid().ToString("N")
+} elseif ($ExecutionId -notmatch '^[a-fA-F0-9]{32}$') {
+    throw "ExecutionId must be a 32-character hexadecimal GUID without separators."
 }
-$RetryGroupId = $RetryGroupId.ToLowerInvariant()
+$ExecutionId = $ExecutionId.ToLowerInvariant()
 
 $tagMatches = [regex]::Matches($ExpandedPrompt, '<image(\d+)>')
 $tagNumbers = @($tagMatches | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object -Unique)
@@ -135,7 +145,8 @@ if ($TaskMode -eq "Edit" -and $InputImages.Count -gt 1) {
 
 $templatePath = Join-Path (Split-Path -Parent $PSScriptRoot) "assets\qwen21-unified-api.json"
 $lifecyclePath = Join-Path $PSScriptRoot "comfy-lifecycle.ps1"
-$retryStateRoot = "E:\ComfyUI\.fish-draws-runtime\retry-attempts"
+$executionStateRoot = "E:\ComfyUI\.fish-draws-runtime\execution-attempts"
+$runtimeRoot = "E:\ComfyUI\.fish-draws-runtime"
 $jobId = [guid]::NewGuid().ToString("N")
 $startedAt = Get-Date
 $referenceDimensions = @()
@@ -158,10 +169,10 @@ if ($TaskMode -eq "Edit") {
 $result = [ordered]@{
     ok = $false
     job_id = $jobId
-    retry_group_id = $RetryGroupId
-    attempt_number = $AttemptNumber
-    max_attempts = 3
-    attempts_remaining = 3 - $AttemptNumber
+    execution_id = $ExecutionId
+    technical_attempt = $TechnicalAttempt
+    max_technical_attempts = 4
+    failure_class = $null
     task_mode = $TaskMode.ToLowerInvariant()
     original_prompt = $OriginalPrompt
     expanded_prompt = $ExpandedPrompt
@@ -181,10 +192,17 @@ $result = [ordered]@{
     requested_reserve_mib = $ReserveMiB
     vram_free_after_shrink_mib = $null
     minimum_gpu_free_mib = $null
+    minimum_system_available_mib = $null
+    safety_profile = $safetyProfileName
+    safety_profile_calibrated = [bool]$safetyProfile.calibrated
+    safety_profile_user_override = [bool]$safetyProfile.user_override
+    safety_profile_approval = [string]$safetyProfile.approval_source
+    calibration_run = [bool]$CalibrationRun
     reference_original_dimensions = @()
     input_mapping = @()
     images = @()
     outputs = @()
+    resource_metrics = $null
     seeds = @()
     strata_restored = $false
     comfy_managed = $false
@@ -212,7 +230,8 @@ $strataBaseUrl = $null
 $activePromptId = $null
 $stagedInputDirectory = $null
 $stagedInputNames = @()
-$attemptRegistered = $false
+$technicalAttemptRegistered = $false
+$preflightManifest = $null
 $exitCode = 0
 
 function Invoke-JsonRequest {
@@ -248,10 +267,23 @@ function Get-GpuFreeMiB {
     return $null
 }
 
+function Get-SystemAvailableMiB {
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        return [int][Math]::Floor([double]$os.FreePhysicalMemory / 1024.0)
+    } catch {
+        try { return [int][Math]::Floor((Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue) } catch { return $null }
+    }
+}
+
 function Update-MinimumGpuFree {
     $free = Get-GpuFreeMiB
     if ($null -ne $free -and ($null -eq $result.minimum_gpu_free_mib -or $free -lt $result.minimum_gpu_free_mib)) {
         $result.minimum_gpu_free_mib = $free
+    }
+    $systemAvailable = Get-SystemAvailableMiB
+    if ($null -ne $systemAvailable -and ($null -eq $result.minimum_system_available_mib -or $systemAvailable -lt $result.minimum_system_available_mib)) {
+        $result.minimum_system_available_mib = $systemAvailable
     }
 }
 
@@ -321,7 +353,7 @@ function Stop-ComfyPromptSafely {
 }
 
 function Wait-ComfyResult {
-    param([string]$PromptId, [int]$TimeoutSec)
+    param([string]$PromptId, [int]$TimeoutSec, [string[]]$SaveNodeIds = @("11"))
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         Update-MinimumGpuFree
@@ -334,11 +366,15 @@ function Wait-ComfyResult {
                     $messages = $entry.status.messages | ConvertTo-Json -Depth 20 -Compress
                     throw "ComfyUI execution failed for prompt ${PromptId}: $messages"
                 }
-                $saveNode = $entry.outputs.PSObject.Properties["11"]
-                if ($null -eq $saveNode -or @($saveNode.Value.images).Count -eq 0) {
-                    throw "ComfyUI completed prompt $PromptId without a saved image."
+                $saved = @()
+                foreach ($saveNodeId in $SaveNodeIds) {
+                    $saveNode = $entry.outputs.PSObject.Properties[$saveNodeId]
+                    if ($null -eq $saveNode -or @($saveNode.Value.images).Count -eq 0) {
+                        throw "ComfyUI completed prompt $PromptId without an image from save node '$saveNodeId'."
+                    }
+                    $saved += @($saveNode.Value.images)
                 }
-                return $saveNode.Value.images
+                return $saved
             }
         }
         Start-Sleep -Seconds 2
@@ -391,19 +427,52 @@ function Remove-StagedReferenceImages {
     }
 }
 
+function Get-TextSha256 {
+    param([string]$Text)
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text)))
+}
+
+function Read-ValidatedPreflightManifest {
+    if ($TaskMode -ne "Edit") { return $null }
+    if ([string]::IsNullOrWhiteSpace($PreflightManifestPath)) { throw "Edit requires a visual preflight manifest created by new-fish-draws-preflight.ps1." }
+    $preflightRoot = Join-Path $runtimeRoot "preflight"
+    if (-not (Test-FishDrawsPathUnderRoot -Path $PreflightManifestPath -Root $preflightRoot)) { throw "Preflight manifest must remain under the fish-draws runtime preflight directory." }
+    if (-not (Test-Path -LiteralPath $PreflightManifestPath -PathType Leaf)) { throw "Preflight manifest not found: $PreflightManifestPath" }
+    $manifest = Get-Content -LiteralPath $PreflightManifestPath -Raw | ConvertFrom-Json
+    if ([int]$manifest.schema_version -ne 1 -or [string]$manifest.execution_id -ne $ExecutionId) { throw "Preflight manifest identity mismatch." }
+    if ([bool]$manifest.calibration_only -ne [bool]$CalibrationRun) { throw "Calibration-only preflight manifests cannot be used for normal delivery, and normal manifests cannot be substituted during calibration." }
+    if ($manifest.ready -ne $true) { throw "Preflight requires user confirmation before generation." }
+    if ([string]$manifest.expanded_prompt_sha256 -ne (Get-TextSha256 -Text $ExpandedPrompt)) { throw "Expanded prompt changed after preflight confirmation." }
+    if (@($manifest.references).Count -ne $InputImages.Count) { throw "Preflight reference count mismatch." }
+    for ($index = 0; $index -lt $InputImages.Count; $index++) {
+        $metadata = Get-FishDrawsImageMetadata -Path $InputImages[$index]
+        if ([string]$manifest.references[$index].sha256 -ne $metadata.sha256) { throw "Reference image $($index + 1) changed after visual preflight." }
+    }
+    return $manifest
+}
+
+function Resolve-ComfyOutputPath {
+    param($ImageRecord)
+    if ($ImageRecord.type -ne "output") { throw "Unexpected ComfyUI image type '$($ImageRecord.type)'." }
+    $outputRootFull = [IO.Path]::GetFullPath($ComfyOutputRoot).TrimEnd('\') + '\'
+    $candidate = Join-Path $ComfyOutputRoot (Join-Path ([string]$ImageRecord.subfolder) ([string]$ImageRecord.filename))
+    $fullPath = [IO.Path]::GetFullPath($candidate)
+    if (-not $fullPath.StartsWith($outputRootFull, [StringComparison]::OrdinalIgnoreCase)) { throw "ComfyUI returned a path outside the output directory." }
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "ComfyUI output was not found: $fullPath" }
+    return $fullPath
+}
+
+$failurePhase = "preflight"
 try {
     $hasMutex = $mutex.WaitOne(0)
     if (-not $hasMutex) { throw "Another fish-draws job is already running." }
-    [void](Register-FishDrawsAttempt `
-        -RetryGroupId $RetryGroupId `
-        -AttemptNumber $AttemptNumber `
-        -TaskMode $TaskMode `
-        -StateRoot $retryStateRoot)
-    $attemptRegistered = $true
+    $preflightManifest = Read-ValidatedPreflightManifest
     if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "Workflow template not found: $templatePath" }
     if (-not (Test-Path -LiteralPath $StrataConfig -PathType Leaf)) { throw "Strata config not found: $StrataConfig" }
+    $failurePhase = "startup"
     if (-not (Test-ComfyOnline)) { throw "ComfyUI is offline at $ComfyBaseUrl. Start it as a separate DSH-managed background job, wait for /system_stats, then run this helper again." }
 
+    $failurePhase = "technical"
     $result.comfy_managed = Touch-ManagedComfyActivity
     if (-not (Wait-ComfyIdle -TimeoutSec 30)) { throw "ComfyUI already has another running or queued job." }
     if (-not (Free-ComfyModels)) { throw "ComfyUI was not confirmed idle before the VRAM handoff." }
@@ -433,12 +502,11 @@ try {
     }
 
     if ($Seed -lt 0) { $Seed = [long](Get-Random -Minimum 1 -Maximum 2147483647) }
-    $outputRootFull = [IO.Path]::GetFullPath($ComfyOutputRoot).TrimEnd('\') + '\'
-
     for ($index = 0; $index -lt $Count; $index++) {
         $imageSeed = $Seed + $index
         $result.seeds += $imageSeed
-        $prefix = "fish-draws/$((Get-Date).ToString('yyyyMMdd'))/$jobId/image-$($index + 1)"
+        $outputNamespace = $(if ($CalibrationRun) { "fish-draws-calibration" } else { "fish-draws" })
+        $prefix = "$outputNamespace/$((Get-Date).ToString('yyyyMMdd'))/$jobId/image-$($index + 1)"
         $graph = New-FishDrawsGraph `
             -TemplatePath $templatePath `
             -ExpandedPrompt $ExpandedPrompt `
@@ -452,30 +520,33 @@ try {
             -Acceleration $Acceleration `
             -FilenamePrefix $prefix
 
+        if (-not $technicalAttemptRegistered) {
+            [void](Register-FishDrawsTechnicalAttempt `
+                -ExecutionId $ExecutionId `
+                -TechnicalAttempt $TechnicalAttempt `
+                -TaskMode $TaskMode `
+                -StateRoot $executionStateRoot)
+            $technicalAttemptRegistered = $true
+        }
         $submission = Invoke-JsonRequest -Method Post -Uri "$ComfyBaseUrl/prompt" -Body @{ prompt = $graph; client_id = "fish-draws-$jobId" } -TimeoutSec 30
         if ([string]::IsNullOrWhiteSpace([string]$submission.prompt_id)) { throw "ComfyUI did not return a prompt_id." }
         $activePromptId = [string]$submission.prompt_id
         $images = Wait-ComfyResult -PromptId $activePromptId -TimeoutSec $TimeoutSecondsPerImage
         foreach ($image in @($images)) {
-            if ($image.type -ne "output") { throw "Unexpected ComfyUI image type '$($image.type)'." }
-            $candidate = Join-Path $ComfyOutputRoot (Join-Path ([string]$image.subfolder) ([string]$image.filename))
-            $fullPath = [IO.Path]::GetFullPath($candidate)
-            if (-not $fullPath.StartsWith($outputRootFull, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "ComfyUI returned a path outside the output directory."
-            }
-            if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Generated image was not found: $fullPath" }
-            $dimensions = Get-FishDrawsImageDimensions -Path $fullPath
-            if ($dimensions.width -ne $TargetWidth -or $dimensions.height -ne $TargetHeight) {
-                throw "Generated PNG has $($dimensions.width)x$($dimensions.height), expected ${TargetWidth}x${TargetHeight}."
+            $fullPath = Resolve-ComfyOutputPath -ImageRecord $image
+            $metadata = Get-FishDrawsImageMetadata -Path $fullPath
+            if ($metadata.width -ne $TargetWidth -or $metadata.height -ne $TargetHeight) {
+                throw "Generated PNG has $($metadata.width)x$($metadata.height), expected ${TargetWidth}x${TargetHeight}."
             }
             $normalizedPath = $fullPath -replace '\\', '/'
-            $result.images += $normalizedPath
-            $result.outputs += [ordered]@{
+            $outputRecord = [ordered]@{
                 path = $normalizedPath
-                width = $dimensions.width
-                height = $dimensions.height
+                width = $metadata.width
+                height = $metadata.height
                 seed = $imageSeed
             }
+            $result.images += $normalizedPath
+            $result.outputs += $outputRecord
         }
         $activePromptId = $null
     }
@@ -488,6 +559,7 @@ try {
 }
 catch {
     $result.error = $_.Exception.Message
+    $result.failure_class = $failurePhase
     $exitCode = 1
     if ($strataShrunk) {
         $stopped = Stop-ComfyPromptSafely -PromptId $activePromptId
@@ -530,16 +602,16 @@ finally {
         $result.cleanup = "inputs_removed_before_vram_handoff"
     }
     if ($result.comfy_managed) { [void](Touch-ManagedComfyActivity) }
-    if ($attemptRegistered) {
+    if ($technicalAttemptRegistered) {
         try {
-            Set-FishDrawsAttemptOutcome `
-                -RetryGroupId $RetryGroupId `
-                -StateRoot $retryStateRoot `
+            Set-FishDrawsTechnicalAttemptOutcome `
+                -ExecutionId $ExecutionId `
+                -StateRoot $executionStateRoot `
                 -Completed ([bool]$result.ok) `
                 -LastError ([string]$result.error)
         } catch {
             $result.ok = $false
-            $result.error = (($result.error + "; ").TrimStart('; ')) + "Retry state update failed: $($_.Exception.Message)"
+            $result.error = (($result.error + "; ").TrimStart('; ')) + "Technical-attempt state update failed: $($_.Exception.Message)"
             $exitCode = 1
         }
     }
@@ -548,5 +620,12 @@ finally {
 }
 
 $result.duration_seconds = [Math]::Round(((Get-Date) - $startedAt).TotalSeconds, 2)
+$result.resource_metrics = [ordered]@{
+    requested_reserve_mib = $ReserveMiB
+    vram_free_after_shrink_mib = $result.vram_free_after_shrink_mib
+    minimum_gpu_free_mib = $result.minimum_gpu_free_mib
+    minimum_system_available_mib = $result.minimum_system_available_mib
+    duration_seconds = $result.duration_seconds
+}
 $result | ConvertTo-Json -Depth 30
 exit $exitCode

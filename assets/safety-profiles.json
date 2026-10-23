@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "t2i-balanced": { "max_sample_width": 2048, "max_sample_height": 2048, "max_sample_pixels": 2400000, "calibrated": false },
+    "edit-single-balanced": { "max_sample_width": 2048, "max_sample_height": 2048, "max_sample_pixels": 2400000, "calibrated": false },
+    "edit-multi-balanced": { "max_sample_width": 2048, "max_sample_height": 2048, "max_sample_pixels": 2400000, "calibrated": false },
+    "fast-batch": { "max_sample_width": 2048, "max_sample_height": 2048, "max_sample_pixels": 2400000, "calibrated": false }
+  }
+}

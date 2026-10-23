@@ -1,5 +1,17 @@
 $ErrorActionPreference = "Stop"
 
+function Test-FishDrawsPathUnderRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [switch]$AllowRoot
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if ($AllowRoot -and $fullPath.Equals($fullRoot, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $fullPath.StartsWith($fullRoot + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-FishDrawsRatioSizes {
     return [ordered]@{
         "1:1"   = @(1440, 1440)
@@ -52,6 +64,44 @@ function Get-FishDrawsImageDimensions {
     }
 }
 
+function Get-FishDrawsImageMetadata {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Image not found: $fullPath" }
+    Add-Type -AssemblyName PresentationCore
+    $stream = [IO.File]::OpenRead($fullPath)
+    try {
+        $decoder = [Windows.Media.Imaging.BitmapDecoder]::Create(
+            $stream,
+            [Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+            [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        )
+        if ($decoder.Frames.Count -lt 1) { throw "Image has no decodable frame: $fullPath" }
+        $frame = $decoder.Frames[0]
+        $format = [string]$frame.Format
+        $hasAlpha = ($format -match '(?i)(rgba|bgra|prgba|pbgra|argb)')
+        if ([IO.Path]::GetExtension($fullPath).Equals(".png", [StringComparison]::OrdinalIgnoreCase)) {
+            $header = New-Object byte[] 26
+            $stream.Position = 0
+            $read = $stream.Read($header, 0, $header.Length)
+            if ($read -ge 26 -and $header[0] -eq 137 -and $header[1] -eq 80 -and $header[2] -eq 78 -and $header[3] -eq 71) {
+                $hasAlpha = ($header[25] -eq 4 -or $header[25] -eq 6)
+            }
+        }
+        return [pscustomobject][ordered]@{
+            path = $fullPath
+            width = [int]$frame.PixelWidth
+            height = [int]$frame.PixelHeight
+            pixel_format = $format
+            has_alpha = $hasAlpha
+            sha256 = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Get-FishDrawsSampleCanvas {
     param(
         [Parameter(Mandatory = $true)][ValidateRange(1, 100000)][int]$TargetWidth,
@@ -68,6 +118,69 @@ function Get-FishDrawsSampleCanvas {
         sample_pixels = $samplePixels
         safe = ($sampleWidth -le 2048 -and $sampleHeight -le 2048 -and $samplePixels -le 2400000)
     }
+}
+
+function Get-FishDrawsSafetyProfileName {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("T2I", "Edit")][string]$TaskMode,
+        [Parameter(Mandatory = $true)][int]$InputCount,
+        [Parameter(Mandatory = $true)][ValidateSet("Balanced", "Fast")][string]$Acceleration,
+        [Parameter(Mandatory = $true)][int]$Count
+    )
+    if ($Acceleration -eq "Fast" -or $Count -gt 1) { return "fast-batch" }
+    if ($TaskMode -eq "T2I") { return "t2i-balanced" }
+    if ($InputCount -le 1) { return "edit-single-balanced" }
+    return "edit-multi-balanced"
+}
+
+function Get-FishDrawsSafetyProfile {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileName,
+        [string]$DefaultProfilesPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "assets\safety-profiles.json"),
+        [string]$CalibratedProfilesPath = "E:\ComfyUI\.fish-draws-runtime\calibration\safety-profiles.json"
+    )
+    $sourcePath = $DefaultProfilesPath
+    if (Test-Path -LiteralPath $CalibratedProfilesPath -PathType Leaf) { $sourcePath = $CalibratedProfilesPath }
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Safety profiles not found: $sourcePath" }
+    $document = Get-Content -LiteralPath $sourcePath -Raw | ConvertFrom-Json
+    if ([int]$document.schema_version -ne 1) { throw "Unsupported safety-profile schema in $sourcePath." }
+    $profile = $document.profiles.PSObject.Properties[$ProfileName]
+    if ($null -eq $profile) { throw "Safety profile '$ProfileName' is missing from $sourcePath." }
+    $value = $profile.Value
+    $maxWidth = [int]$value.max_sample_width
+    $maxHeight = [int]$value.max_sample_height
+    $maxPixels = [long]$value.max_sample_pixels
+    $calibrated = [bool]$value.calibrated
+    $userOverride = ($null -ne $value.PSObject.Properties['user_override'] -and [bool]$value.user_override)
+    $approvalSource = $(if ($calibrated) { "calibration" } elseif ($userOverride) { "user_override" } else { "conservative_default" })
+    if ($maxWidth -lt 1 -or $maxHeight -lt 1 -or $maxPixels -lt 1) { throw "Safety profile '$ProfileName' contains non-positive limits." }
+    if ($maxWidth -gt 2560 -or $maxHeight -gt 2560 -or $maxPixels -gt 3686400) { throw "Safety profile '$ProfileName' exceeds the hard high-resolution candidate envelope." }
+    if (($maxWidth -gt 2048 -or $maxHeight -gt 2048 -or $maxPixels -gt 2400000) -and -not ($calibrated -or $userOverride)) { throw "Safety profile '$ProfileName' widens defaults without calibration or an explicit user override." }
+    $profileReserve = $(if ($null -eq $value.reserve_mib) { $null } else { [int]$value.reserve_mib })
+    if (($calibrated -or $userOverride) -and ($null -eq $profileReserve -or $profileReserve -lt 21504 -or $profileReserve -gt 24576)) { throw "Approved high-resolution profile '$ProfileName' has an invalid reserve_mib." }
+    return [pscustomobject][ordered]@{
+        name = $ProfileName
+        max_sample_width = $maxWidth
+        max_sample_height = $maxHeight
+        max_sample_pixels = $maxPixels
+        calibrated = $calibrated
+        user_override = $userOverride
+        approval_source = $approvalSource
+        reserve_mib = $profileReserve
+        source_path = [IO.Path]::GetFullPath($sourcePath)
+    }
+}
+
+function Test-FishDrawsCanvasAgainstProfile {
+    param(
+        [Parameter(Mandatory = $true)]$Canvas,
+        [Parameter(Mandatory = $true)]$Profile
+    )
+    return (
+        [int]$Canvas.sample_width -le [int]$Profile.max_sample_width -and
+        [int]$Canvas.sample_height -le [int]$Profile.max_sample_height -and
+        [long]$Canvas.sample_pixels -le [long]$Profile.max_sample_pixels
+    )
 }
 
 function Test-FishDrawsAspectChanged {
@@ -88,18 +201,18 @@ function ConvertTo-FishDrawsJsonUtf8Bytes {
     return ,([Text.Encoding]::UTF8.GetBytes($json))
 }
 
-function Get-FishDrawsRetryStatePath {
+function Get-FishDrawsExecutionStatePath {
     param(
-        [Parameter(Mandatory = $true)][string]$RetryGroupId,
+        [Parameter(Mandatory = $true)][string]$ExecutionId,
         [Parameter(Mandatory = $true)][string]$StateRoot
     )
-    if ($RetryGroupId -notmatch '^[a-fA-F0-9]{32}$') {
-        throw "RetryGroupId must be a 32-character hexadecimal GUID without separators."
+    if ($ExecutionId -notmatch '^[a-fA-F0-9]{32}$') {
+        throw "ExecutionId must be a 32-character hexadecimal GUID without separators."
     }
-    return Join-Path ([IO.Path]::GetFullPath($StateRoot)) "$($RetryGroupId.ToLowerInvariant()).json"
+    return Join-Path ([IO.Path]::GetFullPath($StateRoot)) "$($ExecutionId.ToLowerInvariant()).json"
 }
 
-function Write-FishDrawsRetryState {
+function Write-FishDrawsExecutionState {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)]$State
@@ -108,10 +221,10 @@ function Write-FishDrawsRetryState {
     [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
 }
 
-function Register-FishDrawsAttempt {
+function Register-FishDrawsTechnicalAttempt {
     param(
-        [Parameter(Mandatory = $true)][string]$RetryGroupId,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 3)][int]$AttemptNumber,
+        [Parameter(Mandatory = $true)][string]$ExecutionId,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 4)][int]$TechnicalAttempt,
         [Parameter(Mandatory = $true)][ValidateSet("T2I", "Edit")][string]$TaskMode,
         [Parameter(Mandatory = $true)][string]$StateRoot
     )
@@ -120,56 +233,70 @@ function Register-FishDrawsAttempt {
     if (-not (Test-Path -LiteralPath $fullRoot -PathType Container)) {
         [void](New-Item -ItemType Directory -Path $fullRoot -Force)
     }
-    $statePath = Get-FishDrawsRetryStatePath -RetryGroupId $RetryGroupId -StateRoot $fullRoot
+    $statePath = Get-FishDrawsExecutionStatePath -ExecutionId $ExecutionId -StateRoot $fullRoot
     $state = $null
     if (Test-Path -LiteralPath $statePath -PathType Leaf) {
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        if ([string]$state.retry_group_id -ne $RetryGroupId.ToLowerInvariant()) {
-            throw "Retry state identity mismatch for '$RetryGroupId'."
+        if ([string]$state.execution_id -ne $ExecutionId.ToLowerInvariant()) {
+            throw "Execution state identity mismatch for '$ExecutionId'."
         }
+        if ($state.closed -eq $true) { throw "Execution '$ExecutionId' is already closed by a valid generated result. Start a new ExecutionId for a quality rework." }
     }
 
     $highestAttempt = $(if ($null -eq $state) { 0 } else { [int]$state.highest_attempt })
-    if ($highestAttempt -ge 3) {
-        throw "Retry limit reached for '$RetryGroupId': at most three total generation attempts are allowed."
+    if ($highestAttempt -ge 4) {
+        throw "Technical retry limit reached for '$ExecutionId': one initial submission plus three retries are allowed."
     }
     $expectedAttempt = $highestAttempt + 1
-    if ($AttemptNumber -ne $expectedAttempt) {
-        throw "AttemptNumber must be $expectedAttempt for retry group '$RetryGroupId'; received $AttemptNumber."
+    if ($TechnicalAttempt -ne $expectedAttempt) {
+        throw "TechnicalAttempt must be $expectedAttempt for execution '$ExecutionId'; received $TechnicalAttempt."
     }
 
     $now = [DateTime]::UtcNow.ToString("o")
     $record = [ordered]@{
-        retry_group_id = $RetryGroupId.ToLowerInvariant()
+        execution_id = $ExecutionId.ToLowerInvariant()
         task_mode = $TaskMode.ToLowerInvariant()
-        max_attempts = 3
-        highest_attempt = $AttemptNumber
-        attempts_remaining = 3 - $AttemptNumber
+        max_technical_attempts = 4
+        highest_attempt = $TechnicalAttempt
+        closed = $false
         last_result_ok = $null
         created_at_utc = $(if ($null -eq $state) { $now } else { [string]$state.created_at_utc })
         updated_at_utc = $now
         last_error = $null
     }
-    Write-FishDrawsRetryState -Path $statePath -State $record
+    Write-FishDrawsExecutionState -Path $statePath -State $record
     return [pscustomobject]$record
 }
 
-function Set-FishDrawsAttemptOutcome {
+function Set-FishDrawsTechnicalAttemptOutcome {
     param(
-        [Parameter(Mandatory = $true)][string]$RetryGroupId,
+        [Parameter(Mandatory = $true)][string]$ExecutionId,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][bool]$Completed,
         [AllowEmptyString()][string]$LastError = ""
     )
-    $statePath = Get-FishDrawsRetryStatePath -RetryGroupId $RetryGroupId -StateRoot $StateRoot
+    $statePath = Get-FishDrawsExecutionStatePath -ExecutionId $ExecutionId -StateRoot $StateRoot
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
-        throw "Retry state not found for '$RetryGroupId'."
+        throw "Execution state not found for '$ExecutionId'."
     }
     $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
     $state.last_result_ok = $Completed
+    $state.closed = $Completed
     $state.updated_at_utc = [DateTime]::UtcNow.ToString("o")
     $state.last_error = $(if ([string]::IsNullOrWhiteSpace($LastError)) { $null } else { $LastError })
-    Write-FishDrawsRetryState -Path $statePath -State $state
+    Write-FishDrawsExecutionState -Path $statePath -State $state
+}
+
+# v2.0 compatibility aliases. Remove after callers have migrated to ExecutionId/TechnicalAttempt.
+function Get-FishDrawsRetryStatePath { param([string]$RetryGroupId, [string]$StateRoot); Get-FishDrawsExecutionStatePath -ExecutionId $RetryGroupId -StateRoot $StateRoot }
+function Write-FishDrawsRetryState { param([string]$Path, $State); Write-FishDrawsExecutionState -Path $Path -State $State }
+function Register-FishDrawsAttempt {
+    param([string]$RetryGroupId, [ValidateRange(1, 4)][int]$AttemptNumber, [ValidateSet("T2I", "Edit")][string]$TaskMode, [string]$StateRoot)
+    Register-FishDrawsTechnicalAttempt -ExecutionId $RetryGroupId -TechnicalAttempt $AttemptNumber -TaskMode $TaskMode -StateRoot $StateRoot
+}
+function Set-FishDrawsAttemptOutcome {
+    param([string]$RetryGroupId, [string]$StateRoot, [bool]$Completed, [string]$LastError = "")
+    Set-FishDrawsTechnicalAttemptOutcome -ExecutionId $RetryGroupId -StateRoot $StateRoot -Completed $Completed -LastError $LastError
 }
 
 function New-FishDrawsGraph {
