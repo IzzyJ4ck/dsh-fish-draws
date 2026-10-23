@@ -12,7 +12,10 @@ param(
 
     [string]$AspectRatio = "",
     [string]$SizeReferenceImage = "",
-    [string]$CanvasImage = ""
+    [string]$CanvasImage = "",
+
+    [ValidateSet("Balanced", "Fast")][string]$Acceleration = "Balanced",
+    [ValidateRange(1, 32)][int]$Count = 1
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,6 +76,10 @@ if ($TargetWidth -gt 0) {
 }
 
 $canvas = Get-FishDrawsSampleCanvas -TargetWidth $resolvedWidth -TargetHeight $resolvedHeight
+$effectiveAcceleration = $(if ($Count -gt 1) { "Fast" } else { $Acceleration })
+$safetyProfileName = Get-FishDrawsSafetyProfileName -TaskMode Edit -InputCount $InputImages.Count -Acceleration $effectiveAcceleration -Count $Count
+$safetyProfile = Get-FishDrawsSafetyProfile -ProfileName $safetyProfileName
+$safeForProfile = Test-FishDrawsCanvasAgainstProfile -Canvas $canvas -Profile $safetyProfile
 $aspectChanged = Test-FishDrawsAspectChanged `
     -SourceWidth ([int]$canvasRecord.width) `
     -SourceHeight ([int]$canvasRecord.height) `
@@ -98,9 +105,11 @@ for ($canonicalIndex = 0; $canonicalIndex -lt $canonicalRecords.Count; $canonica
     }
 }
 
+$executionId = [guid]::NewGuid().ToString("N")
 [ordered]@{
     ok = $true
-    request_id = [guid]::NewGuid().ToString("N")
+    execution_id = $executionId
+    request_id = $executionId
     input_images = @($canonicalRecords.path)
     input_mapping = $inputMapping
     reference_original_dimensions = @($inputMapping | ForEach-Object {
@@ -119,10 +128,14 @@ for ($canonicalIndex = 0; $canonicalIndex -lt $canonicalRecords.Count; $canonica
     sample_pixels = $canvas.sample_pixels
     outpainting_required = $aspectChanged
     outpainting_direction = $outpaintingDirection
-    oversize_confirmation_required = (-not $canvas.safe)
+    oversize_confirmation_required = (-not $safeForProfile)
+    safety_profile = $safetyProfileName
+    safety_profile_calibrated = [bool]$safetyProfile.calibrated
+    safety_profile_user_override = [bool]$safetyProfile.user_override
+    safety_profile_approval = [string]$safetyProfile.approval_source
     safe_limits = [ordered]@{
-        max_sample_width = 2048
-        max_sample_height = 2048
-        max_sample_pixels = 2400000
+        max_sample_width = $safetyProfile.max_sample_width
+        max_sample_height = $safetyProfile.max_sample_height
+        max_sample_pixels = $safetyProfile.max_sample_pixels
     }
 } | ConvertTo-Json -Depth 12
