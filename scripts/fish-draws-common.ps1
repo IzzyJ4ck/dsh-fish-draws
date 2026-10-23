@@ -1,5 +1,12 @@
 $ErrorActionPreference = "Stop"
 
+function Get-FishDrawsTextSha256 {
+    param([AllowEmptyString()][string]$Text = "")
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)) } finally { $sha.Dispose() }
+    return (-join ($bytes | ForEach-Object { $_.ToString("x2") }))
+}
+
 function Test-FishDrawsPathUnderRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Path,

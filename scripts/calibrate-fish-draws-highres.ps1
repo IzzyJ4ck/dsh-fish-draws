@@ -24,6 +24,8 @@ try { [void](Invoke-RestMethod -Uri "http://127.0.0.1:8188/system_stats" -Method
 
 $invokePath = Join-Path $PSScriptRoot "invoke-fish-draws.ps1"
 $preflightPath = Join-Path $PSScriptRoot "new-fish-draws-preflight.ps1"
+$taskPath = Join-Path $PSScriptRoot "new-fish-draws-task.ps1"
+$completeTaskPath = Join-Path $PSScriptRoot "complete-fish-draws-task.ps1"
 $defaultProfilesPath = Join-Path (Split-Path -Parent $PSScriptRoot) "assets\safety-profiles.json"
 $calibrationDirectory = Join-Path $RuntimeRoot "calibration"
 if (-not (Test-Path -LiteralPath $calibrationDirectory -PathType Container)) { [void](New-Item -ItemType Directory -Path $calibrationDirectory -Force) }
@@ -69,14 +71,17 @@ foreach ($profile in $selectedProfiles) {
         $reservePassed = $true
         foreach ($orientation in $orientations) {
             for ($run = 1; $run -le $RunsPerOrientation; $run++) {
+                $taskId = [guid]::NewGuid().ToString("N")
                 $executionId = [guid]::NewGuid().ToString("N")
+                $calibrationPrompt = "high-resolution calibration"
+                $taskResult = & $taskPath -TaskId $taskId -TaskMode $profile.task -OriginalPrompt $calibrationPrompt -InputImages $profile.inputs -RuntimeRoot $RuntimeRoot | ConvertFrom-Json
                 $preflight = $null
                 if ($profile.task -eq "Edit") {
                     $facts = @()
                     for ($index = 0; $index -lt $profile.inputs.Count; $index++) {
                         $facts += [ordered]@{ image_tag = $(if ($profile.inputs.Count -gt 1) { "<image$($index + 1)>" } else { "" }); certain = @("performance calibration reference"); counts = @(); positions = @(); readable_text = @(); occlusion = @(); uncertain = @() }
                     }
-                    $preflightResult = & $preflightPath -ExecutionId $executionId -InputImages $profile.inputs -TaskClass Simple -FactsJson ($facts | ConvertTo-Json -Depth 8 -Compress) -ExpandedPrompt $profile.prompt -CalibrationOnly -RuntimeRoot $RuntimeRoot | ConvertFrom-Json
+                    $preflightResult = & $preflightPath -TaskId $taskId -ExecutionId $executionId -InputImages $profile.inputs -TaskClass Simple -FactsJson ($facts | ConvertTo-Json -Depth 8 -Compress) -ExpandedPrompt $profile.prompt -CalibrationOnly -RuntimeRoot $RuntimeRoot | ConvertFrom-Json
                     $preflight = [string]$preflightResult.preflight_manifest
                 }
 
@@ -84,8 +89,9 @@ foreach ($profile in $selectedProfiles) {
                 $inputLiteral = "@(" + (@($profile.inputs | ForEach-Object { Quote-PowerShellLiteral $_ }) -join ",") + ")"
                 $command = @(
                     "& $(Quote-PowerShellLiteral $invokePath)",
+                    "-TaskId $taskId -TaskManifestPath $(Quote-PowerShellLiteral ([string]$taskResult.task_manifest))",
                     "-ExpandedPrompt $(Quote-PowerShellLiteral $profile.prompt)",
-                    "-OriginalPrompt 'high-resolution calibration'",
+                    "-OriginalPrompt $(Quote-PowerShellLiteral $calibrationPrompt)",
                     "-TaskMode $($profile.task)",
                     "-InputImages $inputLiteral",
                     "-TargetWidth $($orientation.width) -TargetHeight $($orientation.height)",
@@ -107,6 +113,18 @@ foreach ($profile in $selectedProfiles) {
                     $runResult = [pscustomobject]@{ ok = $false; error = $_.Exception.Message; minimum_gpu_free_mib = $null; minimum_system_available_mib = $null; strata_restored = $false; outputs = @() }
                 } finally {
                     Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+                }
+                try {
+                    [void](& $completeTaskPath -TaskId $taskId -TaskManifestPath ([string]$taskResult.task_manifest) -RuntimeRoot $RuntimeRoot)
+                } catch {
+                    $exitCode = 1
+                    $completionError = "Task completion failed: $($_.Exception.Message)"
+                    if ($null -eq $runResult) {
+                        $runResult = [pscustomobject]@{ ok = $false; error = $completionError; minimum_gpu_free_mib = $null; minimum_system_available_mib = $null; strata_restored = $false; outputs = @() }
+                    } else {
+                        $existingError = [string]$runResult.error
+                        $runResult.error = $(if ([string]::IsNullOrWhiteSpace($existingError)) { $completionError } else { "$existingError; $completionError" })
+                    }
                 }
                 $validOutputs = ($runResult.ok -eq $true -and @($runResult.outputs).Count -eq $profile.count -and @($runResult.outputs | Where-Object { [int]$_.width -ne $orientation.width -or [int]$_.height -ne $orientation.height }).Count -eq 0)
                 $gpuOkay = ($null -ne $runResult.minimum_gpu_free_mib -and [int]$runResult.minimum_gpu_free_mib -ge $RequiredGpuFreeMiB)

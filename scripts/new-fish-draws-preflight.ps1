@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$TaskId,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$ExecutionId,
     [Parameter(Mandatory = $true)][ValidateCount(1, 6)][string[]]$InputImages,
     [Parameter(Mandatory = $true)][ValidateSet("Simple", "MultiImage", "Identity", "ReadableText", "AssetExtraction", "DetailDense", "ComplexOutpainting", "Ambiguous")][string]$TaskClass,
@@ -13,7 +14,8 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "fish-draws-common.ps1")
 
-$facts = @($FactsJson | ConvertFrom-Json)
+$parsedFacts = $FactsJson | ConvertFrom-Json
+$facts = @($parsedFacts)
 if ($facts.Count -ne $InputImages.Count) { throw "FactsJson must contain exactly one visual fact record per input image." }
 $references = @()
 for ($index = 0; $index -lt $InputImages.Count; $index++) {
@@ -49,8 +51,10 @@ $ready = ($CalibrationOnly -or -not $requiresConfirmation -or [bool]$UserConfirm
 $directory = Join-Path $RuntimeRoot "preflight"
 if (-not (Test-Path -LiteralPath $directory -PathType Container)) { [void](New-Item -ItemType Directory -Path $directory -Force) }
 $path = Join-Path $directory "$($ExecutionId.ToLowerInvariant()).json"
+$expandedPromptSha256 = Get-FishDrawsTextSha256 -Text $ExpandedPrompt
 $manifest = [ordered]@{
     schema_version = 1
+    task_id = $TaskId.ToLowerInvariant()
     execution_id = $ExecutionId.ToLowerInvariant()
     task_class = $TaskClass.ToLowerInvariant()
     requires_confirmation = $requiresConfirmation
@@ -58,7 +62,7 @@ $manifest = [ordered]@{
     calibration_only = [bool]$CalibrationOnly
     ready = $ready
     expanded_prompt = $ExpandedPrompt
-    expanded_prompt_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($ExpandedPrompt)))
+    expanded_prompt_sha256 = $expandedPromptSha256
     references = $references
     created_at_utc = [datetime]::UtcNow.ToString("o")
 }

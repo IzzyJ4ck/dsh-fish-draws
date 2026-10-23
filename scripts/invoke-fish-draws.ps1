@@ -4,7 +4,16 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$ExpandedPrompt,
 
-    [string]$OriginalPrompt = "",
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$OriginalPrompt,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[a-fA-F0-9]{32}$')]
+    [string]$TaskId,
+
+    [Parameter(Mandatory = $true)]
+    [string]$TaskManifestPath,
 
     [ValidateSet("T2I", "Edit")]
     [string]$TaskMode = "T2I",
@@ -69,6 +78,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 . (Join-Path $PSScriptRoot "fish-draws-common.ps1")
+$TaskId = $TaskId.ToLowerInvariant()
 
 if (($TargetWidth -eq 0) -xor ($TargetHeight -eq 0)) {
     throw "TargetWidth and TargetHeight must be supplied together."
@@ -168,6 +178,7 @@ if ($TaskMode -eq "Edit") {
 
 $result = [ordered]@{
     ok = $false
+    task_id = $TaskId
     job_id = $jobId
     execution_id = $ExecutionId
     technical_attempt = $TechnicalAttempt
@@ -231,6 +242,7 @@ $activePromptId = $null
 $stagedInputDirectory = $null
 $stagedInputNames = @()
 $technicalAttemptRegistered = $false
+$taskManifest = $null
 $preflightManifest = $null
 $exitCode = 0
 
@@ -427,9 +439,27 @@ function Remove-StagedReferenceImages {
     }
 }
 
-function Get-TextSha256 {
-    param([string]$Text)
-    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text)))
+function Read-ValidatedTaskManifest {
+    $taskRoot = Join-Path $runtimeRoot "tasks"
+    if (-not (Test-FishDrawsPathUnderRoot -Path $TaskManifestPath -Root $taskRoot)) { throw "Task manifest must remain under the fish-draws runtime task directory." }
+    if (-not (Test-Path -LiteralPath $TaskManifestPath -PathType Leaf)) { throw "Task manifest not found: $TaskManifestPath" }
+    $activeTaskPath = Join-Path $taskRoot "active-task.json"
+    if (-not (Test-Path -LiteralPath $activeTaskPath -PathType Leaf)) { throw "No active fish-draws task is registered. Create one from the current real user request before generation." }
+    $activeTask = [IO.File]::ReadAllText($activeTaskPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    if ([string]$activeTask.task_id -ne $TaskId) { throw "A different fish-draws task is active. Historical or replayed context cannot start another generation." }
+    $activeManifestPath = [IO.Path]::GetFullPath([string]$activeTask.task_manifest)
+    $requestedManifestPath = [IO.Path]::GetFullPath($TaskManifestPath)
+    if (-not $activeManifestPath.Equals($requestedManifestPath, [StringComparison]::OrdinalIgnoreCase)) { throw "The active task manifest does not match TaskManifestPath." }
+    $manifest = [IO.File]::ReadAllText($TaskManifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    if ([int]$manifest.schema_version -ne 1 -or [string]$manifest.task_id -ne $TaskId) { throw "Task manifest identity mismatch." }
+    if ([string]$manifest.task_mode -ne $TaskMode.ToLowerInvariant()) { throw "TaskMode changed after the current user task was created." }
+    if ([string]$manifest.original_prompt_sha256 -ne (Get-FishDrawsTextSha256 -Text $OriginalPrompt)) { throw "OriginalPrompt changed after the current user task was created." }
+    if (@($manifest.references).Count -ne $InputImages.Count) { throw "Task manifest reference count mismatch." }
+    for ($index = 0; $index -lt $InputImages.Count; $index++) {
+        $metadata = Get-FishDrawsImageMetadata -Path $InputImages[$index]
+        if ([string]$manifest.references[$index].sha256 -ne $metadata.sha256) { throw "Reference image $($index + 1) changed after the current user task was created." }
+    }
+    return $manifest
 }
 
 function Read-ValidatedPreflightManifest {
@@ -438,11 +468,12 @@ function Read-ValidatedPreflightManifest {
     $preflightRoot = Join-Path $runtimeRoot "preflight"
     if (-not (Test-FishDrawsPathUnderRoot -Path $PreflightManifestPath -Root $preflightRoot)) { throw "Preflight manifest must remain under the fish-draws runtime preflight directory." }
     if (-not (Test-Path -LiteralPath $PreflightManifestPath -PathType Leaf)) { throw "Preflight manifest not found: $PreflightManifestPath" }
-    $manifest = Get-Content -LiteralPath $PreflightManifestPath -Raw | ConvertFrom-Json
+    $manifest = [IO.File]::ReadAllText($PreflightManifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
     if ([int]$manifest.schema_version -ne 1 -or [string]$manifest.execution_id -ne $ExecutionId) { throw "Preflight manifest identity mismatch." }
+    if ([string]$manifest.task_id -ne $TaskId) { throw "Preflight manifest belongs to a different user task." }
     if ([bool]$manifest.calibration_only -ne [bool]$CalibrationRun) { throw "Calibration-only preflight manifests cannot be used for normal delivery, and normal manifests cannot be substituted during calibration." }
     if ($manifest.ready -ne $true) { throw "Preflight requires user confirmation before generation." }
-    if ([string]$manifest.expanded_prompt_sha256 -ne (Get-TextSha256 -Text $ExpandedPrompt)) { throw "Expanded prompt changed after preflight confirmation." }
+    if ([string]$manifest.expanded_prompt_sha256 -ne (Get-FishDrawsTextSha256 -Text $ExpandedPrompt)) { throw "Expanded prompt changed after preflight confirmation." }
     if (@($manifest.references).Count -ne $InputImages.Count) { throw "Preflight reference count mismatch." }
     for ($index = 0; $index -lt $InputImages.Count; $index++) {
         $metadata = Get-FishDrawsImageMetadata -Path $InputImages[$index]
@@ -466,6 +497,7 @@ $failurePhase = "preflight"
 try {
     $hasMutex = $mutex.WaitOne(0)
     if (-not $hasMutex) { throw "Another fish-draws job is already running." }
+    $taskManifest = Read-ValidatedTaskManifest
     $preflightManifest = Read-ValidatedPreflightManifest
     if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "Workflow template not found: $templatePath" }
     if (-not (Test-Path -LiteralPath $StrataConfig -PathType Leaf)) { throw "Strata config not found: $StrataConfig" }
@@ -506,7 +538,7 @@ try {
         $imageSeed = $Seed + $index
         $result.seeds += $imageSeed
         $outputNamespace = $(if ($CalibrationRun) { "fish-draws-calibration" } else { "fish-draws" })
-        $prefix = "$outputNamespace/$((Get-Date).ToString('yyyyMMdd'))/$jobId/image-$($index + 1)"
+        $prefix = "$outputNamespace/$((Get-Date).ToString('yyyyMMdd'))/$TaskId/$jobId/image-$($index + 1)"
         $graph = New-FishDrawsGraph `
             -TemplatePath $templatePath `
             -ExpandedPrompt $ExpandedPrompt `

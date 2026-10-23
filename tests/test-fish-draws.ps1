@@ -2,9 +2,12 @@ $ErrorActionPreference = "Stop"
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $commonPath = Join-Path $skillRoot "scripts\fish-draws-common.ps1"
 $resolverPath = Join-Path $skillRoot "scripts\resolve-fish-draws-size.ps1"
+$taskPath = Join-Path $skillRoot "scripts\new-fish-draws-task.ps1"
+$completeTaskPath = Join-Path $skillRoot "scripts\complete-fish-draws-task.ps1"
 $preflightPath = Join-Path $skillRoot "scripts\new-fish-draws-preflight.ps1"
 $qualityPath = Join-Path $skillRoot "scripts\update-fish-draws-quality.ps1"
 $invokePath = Join-Path $skillRoot "scripts\invoke-fish-draws.ps1"
+$alphaInspectorPath = Join-Path $skillRoot "scripts\inspect-fish-draws-alpha.py"
 $templatePath = Join-Path $skillRoot "assets\qwen21-unified-api.json"
 . $commonPath
 
@@ -66,6 +69,11 @@ $utf8Bytes = ConvertTo-FishDrawsJsonUtf8Bytes -Body @{ prompt = "把黑色上衣
 Assert-True ($utf8Bytes -is [byte[]]) "JSON encoder returns bytes"
 Assert-Equal (([Text.Encoding]::UTF8.GetString($utf8Bytes) | ConvertFrom-Json).prompt) "把黑色上衣改成深红色 🎉" "Chinese and emoji survive UTF-8"
 
+$alphaSourceTimestamp = (Get-Item -LiteralPath $image1).LastWriteTimeUtc
+$alphaInspection = & "E:\ComfyUI\python_embeded\python.exe" $alphaInspectorPath $image1 | ConvertFrom-Json
+Assert-True ($alphaInspection.ok -and $alphaInspection.width -gt 0 -and $alphaInspection.height -gt 0) "standard-library alpha inspector reads a real PNG without modifying it"
+Assert-Equal (Get-Item -LiteralPath $image1).LastWriteTimeUtc $alphaSourceTimestamp "alpha inspection is read-only"
+
 $executionRoot = Join-Path ([IO.Path]::GetTempPath()) ("fish-draws-execution-test-" + [guid]::NewGuid().ToString("N"))
 try {
     $execution = [guid]::NewGuid().ToString("N")
@@ -108,18 +116,42 @@ Assert-Equal $fast.'8'.inputs.model[0] "12" "sampler follows EasyCache"
 # Visual preflight and quality pause policy.
 $preflightRoot = Join-Path ([IO.Path]::GetTempPath()) ("fish-draws-preflight-test-" + [guid]::NewGuid().ToString("N"))
 try {
-    $facts = @([ordered]@{ image_tag = ""; certain = @("one person"); counts = @("one person"); positions = @("center"); readable_text = @(); occlusion = @(); uncertain = @("small blurred badge") }) | ConvertTo-Json -Depth 8 -Compress
-    $simple = & $preflightPath -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1) -TaskClass Simple -FactsJson $facts -ExpandedPrompt "Change the shirt colour." -RuntimeRoot $preflightRoot | ConvertFrom-Json
-    Assert-True $simple.ready "simple edit may proceed"
-    $identity = & $preflightPath -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1) -TaskClass Identity -FactsJson $facts -ExpandedPrompt "Preserve the person's identity." -RuntimeRoot $preflightRoot | ConvertFrom-Json
-    Assert-True (-not $identity.ready) "identity edit waits for confirmation"
+    $t2iTaskId = [guid]::NewGuid().ToString("N")
+    $t2iTask = & $taskPath -TaskId $t2iTaskId -TaskMode T2I -OriginalPrompt "雨夜橘猫" -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    Assert-Equal $t2iTask.task_id $t2iTaskId "T2I task contract preserves task id"
+    $t2iManifest = [IO.File]::ReadAllText($t2iTask.task_manifest, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    Assert-Equal $t2iManifest.task_mode "t2i" "T2I task contract locks mode"
+    Assert-Equal @($t2iManifest.references).Count 0 "T2I task contract has no references"
+    Assert-True ([string]$t2iManifest.original_prompt_sha256 -match '^[a-f0-9]{64}$') "task contract stores prompt hash"
+    Assert-True (-not ([IO.File]::ReadAllText($t2iTask.task_manifest, [Text.Encoding]::UTF8).Contains("雨夜橘猫"))) "task contract does not store clear prompt"
+    Assert-Throws { [void](& $taskPath -TaskMode Edit -OriginalPrompt "phantom replay" -InputImages @($image1) -RuntimeRoot $preflightRoot) } "*still active*" "a historical replay cannot create a second active task"
+    $t2iComplete = & $completeTaskPath -TaskId $t2iTaskId -TaskManifestPath $t2iTask.task_manifest -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    Assert-True $t2iComplete.active_task_cleared "completing a task clears the active lock"
+    Assert-Throws { [void](& $taskPath -TaskId $t2iTaskId -TaskMode T2I -OriginalPrompt "duplicate" -RuntimeRoot $preflightRoot) } "*already exists*" "a completed task id cannot be rebound"
+
+    $editTaskId = [guid]::NewGuid().ToString("N")
+    $editTask = & $taskPath -TaskId $editTaskId -TaskMode Edit -OriginalPrompt "combine references" -InputImages @($image1, $image2) -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    $editManifest = [IO.File]::ReadAllText($editTask.task_manifest, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    Assert-Equal $editManifest.task_mode "edit" "Edit task contract locks mode"
+    Assert-Equal @($editManifest.references).Count 2 "Edit task contract binds every reference"
     $multiFacts = @(
         [ordered]@{ image_tag = "<image1>"; certain = @("primary"); counts = @(); positions = @(); readable_text = @(); occlusion = @(); uncertain = @() },
         [ordered]@{ image_tag = "<image2>"; certain = @("reference"); counts = @(); positions = @(); readable_text = @(); occlusion = @(); uncertain = @() }
     ) | ConvertTo-Json -Depth 8 -Compress
-    $multi = & $preflightPath -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1, $image2) -TaskClass Simple -FactsJson $multiFacts -ExpandedPrompt "Use <image1> as primary and <image2> as reference." -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    $multi = & $preflightPath -TaskId $editTaskId -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1, $image2) -TaskClass Simple -FactsJson $multiFacts -ExpandedPrompt "Use <image1> as primary and <image2> as reference." -RuntimeRoot $preflightRoot | ConvertFrom-Json
     Assert-True (-not $multi.ready) "multi-image edit always waits for confirmation"
-    Assert-Throws { [void](& $preflightPath -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1) -TaskClass Simple -FactsJson $facts -ExpandedPrompt "Make the small blurred badge blue." -RuntimeRoot $preflightRoot) } "*unconfirmed observation*" "uncertainty cannot become prompt fact"
+    [void](& $completeTaskPath -TaskId $editTaskId -TaskManifestPath $editTask.task_manifest -RuntimeRoot $preflightRoot)
+    Assert-Throws { [void](& $taskPath -TaskId $editTaskId -TaskMode T2I -OriginalPrompt "duplicate" -RuntimeRoot $preflightRoot) } "*already exists*" "task id cannot be rebound to another mode"
+
+    $singleEditTaskId = [guid]::NewGuid().ToString("N")
+    $singleEditTask = & $taskPath -TaskId $singleEditTaskId -TaskMode Edit -OriginalPrompt "single edit" -InputImages @($image1) -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    $facts = @([ordered]@{ image_tag = ""; certain = @("one person"); counts = @("one person"); positions = @("center"); readable_text = @(); occlusion = @(); uncertain = @("small blurred badge") }) | ConvertTo-Json -Depth 8 -Compress
+    $simple = & $preflightPath -TaskId $singleEditTaskId -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1) -TaskClass Simple -FactsJson $facts -ExpandedPrompt "Change the shirt colour." -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    Assert-True $simple.ready "simple edit may proceed"
+    $identity = & $preflightPath -TaskId $singleEditTaskId -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1) -TaskClass Identity -FactsJson $facts -ExpandedPrompt "Preserve the person's identity." -RuntimeRoot $preflightRoot | ConvertFrom-Json
+    Assert-True (-not $identity.ready) "identity edit waits for confirmation"
+    Assert-Throws { [void](& $preflightPath -TaskId $singleEditTaskId -ExecutionId ([guid]::NewGuid().ToString("N")) -InputImages @($image1) -TaskClass Simple -FactsJson $facts -ExpandedPrompt "Make the small blurred badge blue." -RuntimeRoot $preflightRoot) } "*unconfirmed observation*" "uncertainty cannot become prompt fact"
+    [void](& $completeTaskPath -TaskId $singleEditTaskId -TaskManifestPath $singleEditTask.task_manifest -RuntimeRoot $preflightRoot)
 } finally { Remove-Item -LiteralPath $preflightRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 $qualityRoot = Join-Path ([IO.Path]::GetTempPath()) ("fish-draws-quality-test-" + [guid]::NewGuid().ToString("N"))
@@ -139,6 +171,18 @@ $startText = Get-Content -LiteralPath (Join-Path $skillRoot "scripts\start-comfy
 Assert-True $startText.Contains('$env:PYTHONUTF8 = "1"') "launcher enables Python UTF-8"
 Assert-True $startText.Contains('$env:PYTHONIOENCODING = "utf-8"') "launcher sets UTF-8 stdio"
 Assert-True $skillText.Contains('run_in_background: true') "background flag is a JSON boolean"
+Assert-True $skillText.Contains('Do not replace the DSH background call with `Start-Process`') "detached lifecycle launch is forbidden"
+Assert-True $skillText.Contains('compressed summary') "historical summaries cannot authorize generation"
+Assert-True $skillText.Contains('Within one user turn, never switch between T2I and Edit') "task mode is immutable within one turn"
+Assert-True $skillText.Contains('Never infer that transparency is impossible merely from node names') "native alpha is tested empirically"
+Assert-True $skillText.Contains('Do not threshold, clamp, key, matte, or otherwise rewrite alpha') "alpha validation remains read-only"
+Assert-True (Test-Path -LiteralPath $taskPath -PathType Leaf) "task-contract helper exists"
+Assert-True (Test-Path -LiteralPath $completeTaskPath -PathType Leaf) "task-completion helper exists"
+Assert-True (Test-Path -LiteralPath $alphaInspectorPath -PathType Leaf) "read-only alpha inspector exists"
+Assert-True $invokeText.Contains('[string]$TaskId') "generation accepts task identity"
+Assert-True $invokeText.Contains('Read-ValidatedTaskManifest') "generation verifies task contract"
+Assert-True $invokeText.Contains('active-task.json') "generation accepts only the active real user task"
+Assert-True $invokeText.Contains('$TaskId/$jobId') "output namespace is scoped by task id"
 Assert-True $invokeText.Contains('[ValidateRange(1, 4)]') "helper exposes four technical submissions"
 Assert-True (-not $invokeText.Contains('attempts_remaining')) "output has no quota wording"
 Assert-True $invokeText.Contains('images = @()') "v2.0 images contract is present"
