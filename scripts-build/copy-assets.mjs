@@ -1,0 +1,11 @@
+import { cp, mkdir } from 'node:fs/promises'
+const root = new URL('../', import.meta.url)
+const out = new URL('../lib/assets/', import.meta.url)
+await mkdir(out, { recursive: true })
+await cp(new URL('assets/skill/', root), new URL('skill/', out), { recursive: true })
+await cp(new URL('references/', root), new URL('references/', out), { recursive: true })
+await mkdir(new URL('workflows/', out), { recursive: true })
+await cp(new URL('assets/qwen21-unified-api.json', root), new URL('workflows/qwen21-unified-api.json', out))
+await mkdir(new URL('config/', out), { recursive: true })
+await cp(new URL('assets/safety-profiles.json', root), new URL('config/safety-profiles.json', out))
+await cp(new URL('assets/licensing/', root), new URL('licensing/', out), { recursive: true })

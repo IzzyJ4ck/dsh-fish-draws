@@ -1,0 +1,98 @@
+{
+  "name": "@izzyj4ck/dsh-fish-draws",
+  "version": "3.0.0",
+  "description": "A DSH bundle for controlled local Qwen Image 2.1 generation and editing through ComfyUI.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "comfyui",
+    "qwen-image",
+    "image-generation",
+    "image-editing"
+  ],
+  "author": "izzyj4ck",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IzzyJ4ck/dsh-fish-draws.git"
+  },
+  "homepage": "https://github.com/IzzyJ4ck/dsh-fish-draws#readme",
+  "icon": "./icon.svg",
+  "bugs": {
+    "url": "https://github.com/IzzyJ4ck/dsh-fish-draws/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "icon.svg",
+    "locale"
+  ],
+  "bin": {
+    "fish-draws-migrate": "lib/bin/fish-draws-migrate.js"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.3 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "dependencies": {},
+  "scripts": {
+    "clean": "node scripts-build/clean.mjs",
+    "build": "pnpm run clean && tsc -p tsconfig.json && node scripts-build/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "release:scan": "node scripts-build/release-scan.mjs",
+    "release:check": "pnpm run typecheck && pnpm test && pnpm run build && pnpm run release:scan"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-agent": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-attachment": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-credentials": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-jobs": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-skill": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-working-directory": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-credentials": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-jobs": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-skill": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-working-directory": "0.2.1-rc.3",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.4"
+  }
+}

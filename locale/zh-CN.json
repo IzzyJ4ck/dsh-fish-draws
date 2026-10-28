@@ -1,0 +1,4 @@
+{
+  "name": "fish-draws",
+  "description": "通过 ComfyUI 受控调用本地 Qwen Image 2.1 进行文生图与图像编辑。"
+}
