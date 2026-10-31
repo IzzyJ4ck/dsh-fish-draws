@@ -7,7 +7,7 @@ import { FishDrawsError, errorMessage } from '../errors.js'
 import { ComfyLifecycle } from './comfy-lifecycle.js'
 import { loadWorkflowTemplate, compileWorkflow, type WorkflowTemplate } from './workflow-compiler.js'
 import { StrataVram } from './strata-vram.js'
-import { promoteOutput, preserveCandidate, removeManagedFile, cleanupEmptyCandidates } from './retention.js'
+import { promoteOutput, preserveCandidate, removeManagedFile, cleanupEmptyCandidates, cleanupEmptyManagedDirectory } from './retention.js'
 import { toManifest, writeManifestAtomic } from './result-manifest.js'
 import type { ResolvedReference, TaskRecord } from './task-state.js'
 
@@ -40,18 +40,21 @@ export class FishDrawsExecutor {
   }
   get activeTaskId(): string | undefined { return this.active?.taskId }
 
-  async execute(request: ExecutionRequest, progress: (value: ExecutionProgress) => void): Promise<TaskRecord> {
+  async execute(request: ExecutionRequest, progress: (value: ExecutionProgress) => void, externalSignal?: AbortSignal): Promise<TaskRecord> {
     if (this.active !== undefined) throw new FishDrawsError('another fish-draws task is active', 'TASK_BUSY', 'preflight')
     const controller = new AbortController()
+    const forwardCancellation = () => {
+      if (!controller.signal.aborted) controller.abort(this.cancellationError(externalSignal?.reason))
+    }
+    if (externalSignal?.aborted) forwardCancellation()
+    else externalSignal?.addEventListener('abort', forwardCancellation, { once: true })
     this.active = { taskId: request.record.taskId, controller, promptId: undefined }
     const signal = controller.signal
     const record = request.record
     const taskDirectory = this.taskDirectory(record.taskId, record.createdAtUtc)
     const resultPath = join(taskDirectory, 'result.json')
-    await mkdir(taskDirectory, { recursive: true })
-    await mkdir(this.runtimeRoot, { recursive: true })
     const activeLock = join(this.runtimeRoot, 'active-task.json')
-    await this.acquireLock(activeLock, record.taskId, record.executionId)
+    let activeLockAcquired = false
     let template = this.template
     const strata = new StrataVram(this.config.strata.vramEndpoint, this.config.strata.credentialRef, this.credentials, join(this.runtimeRoot, 'strata-vram-journal.json'))
     const stagedInputs = join(this.config.comfy.root, 'input', 'fish-draws', record.taskId, record.executionId)
@@ -59,13 +62,19 @@ export class FishDrawsExecutor {
     const workflowPath = join(this.runtimeRoot, 'workflows', `${record.executionId}.json`)
     const promptIds: string[] = []
     try {
+      await mkdir(taskDirectory, { recursive: true })
+      await mkdir(this.runtimeRoot, { recursive: true })
+      signal.throwIfAborted()
+      await this.acquireLock(activeLock, record.taskId, record.executionId)
+      activeLockAcquired = true
+      signal.throwIfAborted()
       template ??= await loadWorkflowTemplate(); this.template = template
       record.status = 'running'; progress({ phase: 'comfy_starting' })
       const online = await this.lifecycle.ensureOnline(this.runtimeRoot, signal)
       record.comfyStartedByPlugin = online.startedByPlugin
       this.lifecycle.cancelIdleShutdown()
       if (!await this.lifecycle.client.waitIdle(30_000, signal)) throw new FishDrawsError('ComfyUI is busy', 'COMFY_BUSY', 'technical', true)
-      await this.lifecycle.client.freeModels(signal)
+      if (!await this.lifecycle.client.freeModels(signal)) throw new FishDrawsError('ComfyUI models could not be unloaded before VRAM handoff', 'COMFY_UNLOAD_FAILED', 'lifecycle')
 
       progress({ phase: 'input_staging' }); await mkdir(stagedInputs, { recursive: true })
       for (let index = 0; index < request.references.length; index += 1) {
@@ -107,36 +116,54 @@ export class FishDrawsExecutor {
         } catch (error) {
           lastError = error
           await this.lifecycle.client.interrupt(this.active.promptId)
-          await this.lifecycle.client.waitIdle(120_000).catch(() => false)
-          await this.lifecycle.client.freeModels().catch(() => false)
-          if (!(error instanceof FishDrawsError && error.retryable) || attempt === 4 || signal.aborted) throw error
+          await this.lifecycle.client.waitIdle(signal.aborted ? 30_000 : 120_000).catch(() => false)
+          const retryable = error instanceof FishDrawsError && error.retryable && attempt < 4 && !signal.aborted
+          if (!retryable) throw error
+
+          // A timed-out high-memory workflow can leave the allocator too fragmented for
+          // /free to satisfy the strict unloaded-VRAM assertion.  Use the lifecycle
+          // fallback so a plugin-owned ComfyUI may be restarted cleanly before retrying.
+          // Do not run this branch for final/non-retryable failures: the outer cleanup
+          // owns their unload and must preserve the original structured error.
+          if (!await this.lifecycle.unloadModels().catch(() => false)) {
+            const code = error instanceof FishDrawsError ? error.code : 'UNEXPECTED'
+            throw new FishDrawsError(`ComfyUI models could not be unloaded before retrying ${code}`, 'COMFY_UNLOAD_FAILED', 'lifecycle')
+          }
+          const onlineAfterReset = await this.lifecycle.ensureOnline(this.runtimeRoot, signal)
+          record.comfyStartedByPlugin ||= onlineAfterReset.startedByPlugin
+          this.lifecycle.cancelIdleShutdown()
         }
       }
       if (lastError !== undefined) throw lastError
       progress({ phase: 'comfy_unloading' })
-      record.comfyModelsUnloaded = await this.lifecycle.client.freeModels(signal)
+      record.comfyModelsUnloaded = await this.lifecycle.unloadModels(signal)
       if (!record.comfyModelsUnloaded) throw new FishDrawsError('ComfyUI models could not be unloaded', 'COMFY_UNLOAD_FAILED', 'lifecycle')
       progress({ phase: 'strata_restoring' })
       record.strataRestored = await strata.restore(signal)
       if (!record.strataRestored) throw new FishDrawsError('Strata reserve could not be restored', 'STRATA_RESTORE_FAILED', 'lifecycle')
+      signal.throwIfAborted()
       record.completedAtUtc = new Date().toISOString()
       if (request.pauseForSelection && !request.formalBatch) record.status = 'awaiting_selection'
       else record.status = 'completed'
     } catch (error) {
       await this.lifecycle.client.interrupt(this.active?.promptId)
-      record.comfyModelsUnloaded = await this.lifecycle.client.freeModels().catch(() => false)
+      record.comfyModelsUnloaded = await this.lifecycle.unloadModels().catch(() => false)
       record.strataRestored = await strata.restore().catch(() => false)
       record.completedAtUtc = new Date().toISOString()
       record.status = signal.aborted ? 'cancelled' : 'failed'
-      const typed = error instanceof FishDrawsError ? error : new FishDrawsError(errorMessage(error), 'UNEXPECTED', 'technical')
+      const typed = signal.aborted
+        ? this.cancellationError(signal.reason, error)
+        : error instanceof FishDrawsError ? error : new FishDrawsError(errorMessage(error), 'UNEXPECTED', 'technical')
       record.failure = { class: typed.failureClass, code: typed.code, message: typed.message }
     } finally {
       progress({ phase: 'cleanup' })
       const residual: string[] = []
       for (const [name, action] of [
         ['temporary_inputs', () => rm(stagedInputs, { recursive: true, force: true })],
+        ['temporary_input_task_directory', () => cleanupEmptyManagedDirectory(resolve(stagedInputs, '..'))],
         ['workflow', () => rm(workflowPath, { force: true })],
         ['comfy_staging', () => rm(join(this.config.comfy.root, 'output', 'fish-draws-staging', record.taskId, record.executionId), { recursive: true, force: true })],
+        ['comfy_staging_task_directory', () => cleanupEmptyManagedDirectory(join(this.config.comfy.root, 'output', 'fish-draws-staging', record.taskId))],
       ] as const) {
         try { await action() } catch { residual.push(name) }
       }
@@ -146,7 +173,9 @@ export class FishDrawsExecutor {
       record.cleanup.queueStateRemoved = true
       record.cleanup.residualItems = residual
       record.cleanup.complete = residual.length === 0
-      try { await rm(activeLock, { force: true }) } catch { residual.push('active_task_lock'); record.cleanup.queueStateRemoved = false }
+      if (activeLockAcquired) {
+        try { await rm(activeLock, { force: true }) } catch { residual.push('active_task_lock'); record.cleanup.queueStateRemoved = false }
+      }
       record.cleanup.residualItems = residual
       record.cleanup.complete = residual.length === 0
       if (record.status === 'completed' && residual.length > 0) {
@@ -158,11 +187,21 @@ export class FishDrawsExecutor {
         await mkdir(join(this.runtimeRoot, 'cleanup-journal'), { recursive: true })
         await writeFile(journalPath, JSON.stringify({ schema_version: 1, task_id: record.taskId, execution_id: record.executionId, residual_items: residual, updated_at_utc: new Date().toISOString() }), { encoding: 'utf8', flag: 'w', mode: 0o600 })
       } else await rm(journalPath, { force: true })
-      await writeManifestAtomic(resultPath, toManifest(record, template?.sha256 ?? 'unavailable'))
-      this.active = undefined
-      this.lifecycle.scheduleIdleShutdown()
+      try {
+        await writeManifestAtomic(resultPath, toManifest(record, template?.sha256 ?? 'unavailable'))
+      } finally {
+        externalSignal?.removeEventListener('abort', forwardCancellation)
+        this.active = undefined
+        this.lifecycle.scheduleIdleShutdown()
+      }
     }
     return record
+  }
+
+  private cancellationError(reason: unknown, fallback: unknown = 'cancelled'): FishDrawsError {
+    if (reason instanceof FishDrawsError && reason.failureClass === 'cancelled') return reason
+    const message = errorMessage(reason ?? fallback).trim()
+    return new FishDrawsError(message.length > 0 ? message : 'cancelled', 'CANCELLED', 'cancelled')
   }
 
   private async promoteGenerated(record: TaskRecord, generated: Array<{ path: string; seed: number }>, taskDirectory: string, request: ExecutionRequest): Promise<void> {

@@ -10,7 +10,8 @@ describe('public v1 endpoint boundary', () => {
   it('uses conservative defaults while accepting explicit high-resolution overrides', () => {
     const defaults = resolveConfig().safety['edit-single-balanced']
     expect(defaults.maxSamplePixels).toBe(2_400_000)
+    expect(defaults.reserveMiB).toBe(21_504)
     const local = resolveConfig({ safety: { editSingleBalanced: { maxSampleWidth: 2560, maxSampleHeight: 2560, maxSamplePixels: 3_686_400, approvalSource: 'user_override' } } }).safety['edit-single-balanced']
-    expect(local).toMatchObject({ maxSampleWidth: 2560, maxSamplePixels: 3_686_400, approvalSource: 'user_override' })
+    expect(local).toMatchObject({ maxSampleWidth: 2560, maxSamplePixels: 3_686_400, reserveMiB: 21_504, approvalSource: 'user_override' })
   })
 })

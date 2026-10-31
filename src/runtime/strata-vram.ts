@@ -3,10 +3,33 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { FishDrawsError } from '../errors.js'
 
-interface Status { loaded?: boolean; busy?: boolean; in_flight?: number; queued?: number; vram?: { elastic?: boolean; reserve_mib?: number } }
+interface VramState {
+  elastic?: boolean
+  reserve_mib?: number
+  expert_slots?: number
+  expert_slots_full?: number
+  expert_cache_mib?: number
+  expert_cache_full_mib?: number
+  vram_free_mib?: number
+}
+
+interface Status {
+  loaded?: boolean
+  busy?: boolean
+  in_flight?: number
+  queued?: number
+  activity?: { in_flight?: number }
+  vram?: VramState
+}
+
+interface VramResult extends VramState { status?: string }
+
+const RELEASE_SHORTFALL_TOLERANCE_MIB = 512
+const RESTORE_CACHE_TOLERANCE_MIB = 512
 
 export class StrataVram {
   private priorReserve: number | undefined
+  private priorExpertCacheMiB: number | undefined
   private released = false
   constructor(private readonly endpoint: URL | undefined, private readonly credentialName: string, private readonly credentials: CredentialProvider, private readonly journalPath?: string) {}
   private async headers(): Promise<Record<string, string>> {
@@ -20,13 +43,13 @@ export class StrataVram {
     if (!response.ok) throw new FishDrawsError(`Strata returned HTTP ${response.status}`, 'STRATA_HTTP', 'lifecycle', true)
     return await response.json() as T
   }
-  async waitIdle(signal?: AbortSignal): Promise<Status> {
-    const deadline = Date.now() + 90_000
+  async waitIdle(signal?: AbortSignal, timeoutMs = 90_000, pollIntervalMs = 1_000): Promise<Status> {
+    const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       signal?.throwIfAborted()
       const status = await this.request<Status>('/v1/status', signal === undefined ? {} : { signal })
-      if ((status.in_flight ?? 0) === 0 && status.busy !== true && (status.queued ?? 0) === 0) return status
-      await new Promise(resolve => setTimeout(resolve, 1_000))
+      if ((status.activity?.in_flight ?? status.in_flight ?? 0) === 0 && status.busy !== true && (status.queued ?? 0) === 0) return status
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
     }
     throw new FishDrawsError('Strata still has active or queued work', 'STRATA_BUSY', 'lifecycle')
   }
@@ -34,29 +57,48 @@ export class StrataVram {
     const status = await this.waitIdle(signal)
     if (status.loaded !== true || status.vram?.elastic !== true) throw new FishDrawsError('Strata is not loaded with elastic VRAM enabled', 'STRATA_NOT_ELASTIC', 'lifecycle')
     this.priorReserve = status.vram.reserve_mib
+    this.priorExpertCacheMiB = status.vram.expert_cache_mib
     if (this.journalPath !== undefined) {
       await mkdir(dirname(this.journalPath), { recursive: true })
-      await writeFile(this.journalPath, JSON.stringify({ schema_version: 1, state: 'releasing', prior_reserve_mib: this.priorReserve ?? null, updated_at_utc: new Date().toISOString() }), { encoding: 'utf8', flag: 'w', mode: 0o600 })
+      await writeFile(this.journalPath, JSON.stringify({ schema_version: 2, state: 'releasing', prior_reserve_mib: this.priorReserve ?? null, prior_expert_cache_mib: this.priorExpertCacheMiB ?? null, updated_at_utc: new Date().toISOString() }), { encoding: 'utf8', flag: 'w', mode: 0o600 })
     }
     this.released = true
-    const result = await this.request<{ status?: string; vram_free_mib?: number }>('/v1/vram', { method: 'POST', body: JSON.stringify({ reserve_mib: reserveMiB }), ...(signal === undefined ? {} : { signal }) })
-    if (result.status !== 'ok' || (result.vram_free_mib ?? 0) < reserveMiB) throw new FishDrawsError('Strata could not free the requested VRAM reserve', 'STRATA_RELEASE_FAILED', 'lifecycle')
-    if (this.journalPath !== undefined) await writeFile(this.journalPath, JSON.stringify({ schema_version: 1, state: 'released', prior_reserve_mib: this.priorReserve ?? null, updated_at_utc: new Date().toISOString() }), { encoding: 'utf8', flag: 'w', mode: 0o600 })
+    const result = await this.request<VramResult>('/v1/vram', { method: 'POST', body: JSON.stringify({ reserve_mib: reserveMiB }), ...(signal === undefined ? {} : { signal }) })
+    const actualFree = result.vram_free_mib
+    if (result.status !== 'ok' || actualFree === undefined || actualFree + RELEASE_SHORTFALL_TOLERANCE_MIB < reserveMiB) {
+      throw new FishDrawsError(`Strata freed ${actualFree ?? 'an unknown amount of'} MiB; ${reserveMiB} MiB was requested`, 'STRATA_RELEASE_FAILED', 'lifecycle')
+    }
+    if (this.journalPath !== undefined) await writeFile(this.journalPath, JSON.stringify({ schema_version: 2, state: 'released', prior_reserve_mib: this.priorReserve ?? null, prior_expert_cache_mib: this.priorExpertCacheMiB ?? null, released_vram_free_mib: actualFree, updated_at_utc: new Date().toISOString() }), { encoding: 'utf8', flag: 'w', mode: 0o600 })
   }
-  async restore(signal?: AbortSignal): Promise<boolean> {
+  async restore(signal?: AbortSignal, timeoutMs = 30_000, pollIntervalMs = 1_000): Promise<boolean> {
     if (!this.released) return true
-    const result = await this.request<{ status?: string }>('/v1/vram', { method: 'POST', body: JSON.stringify({ reserve_mib: this.priorReserve ?? null }), ...(signal === undefined ? {} : { signal }) })
-    if (result.status !== 'ok') return false
-    this.released = false
-    if (this.journalPath !== undefined) await rm(this.journalPath, { force: true })
-    return true
+    const deadline = Date.now() + timeoutMs
+    do {
+      signal?.throwIfAborted()
+      const result = await this.request<VramResult>('/v1/vram', { method: 'POST', body: JSON.stringify({ reserve_mib: this.priorReserve ?? null }), ...(signal === undefined ? {} : { signal }) })
+      if (result.status !== 'ok') return false
+      const status = await this.waitIdle(signal)
+      const vram = status.vram ?? result
+      const reserveRestored = this.priorReserve === undefined || vram.reserve_mib === this.priorReserve
+      const cacheRestored = this.priorExpertCacheMiB === undefined
+        || (vram.expert_cache_mib !== undefined && vram.expert_cache_mib + RESTORE_CACHE_TOLERANCE_MIB >= this.priorExpertCacheMiB)
+      if (reserveRestored && cacheRestored) {
+        this.released = false
+        if (this.journalPath !== undefined) await rm(this.journalPath, { force: true })
+        return true
+      }
+      if (Date.now() >= deadline) break
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
+    } while (true)
+    return false
   }
   async recover(signal?: AbortSignal): Promise<boolean> {
     if (this.journalPath === undefined) return true
-    let value: { schema_version?: number; state?: string; prior_reserve_mib?: number | null }
+    let value: { schema_version?: number; state?: string; prior_reserve_mib?: number | null; prior_expert_cache_mib?: number | null }
     try { value = JSON.parse(await readFile(this.journalPath, 'utf8')) as typeof value } catch { return true }
-    if (value.schema_version !== 1 || !['releasing', 'released'].includes(value.state ?? '')) throw new FishDrawsError('Strata recovery journal is invalid', 'STRATA_JOURNAL_INVALID', 'lifecycle')
+    if (![1, 2].includes(value.schema_version ?? -1) || !['releasing', 'released'].includes(value.state ?? '')) throw new FishDrawsError('Strata recovery journal is invalid', 'STRATA_JOURNAL_INVALID', 'lifecycle')
     this.priorReserve = value.prior_reserve_mib ?? undefined
+    this.priorExpertCacheMiB = value.prior_expert_cache_mib ?? undefined
     this.released = true
     await this.waitIdle(signal)
     return this.restore(signal)

@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { promoteOutput, preserveCandidate } from '../src/runtime/retention.js'
+import { cleanupEmptyManagedDirectory, promoteOutput, preserveCandidate } from '../src/runtime/retention.js'
 
 function png(width: number, height: number): Buffer {
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
@@ -26,5 +26,14 @@ describe('authoritative retention', () => {
     const root = await mkdtemp(join(tmpdir(), 'fish-candidate-')); const staging = join(root, 'stage.png'); await writeFile(staging, png(16, 16))
     const candidate = await preserveCandidate({ source: staging, taskDirectory: root, candidateIndex: 1, outputIndex: 1, seed: 3, executionId: 'run', qualityCycle: 1, targetWidth: 16, targetHeight: 16 })
     expect(candidate.relativePath).toMatch(/^candidates\/rework-01-image-01-seed-3\.png$/u)
+  })
+  it('removes an empty managed task directory without touching a non-empty sibling', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fish-cleanup-'))
+    const empty = join(root, 'empty-task'); const occupied = join(root, 'occupied-task')
+    await mkdir(empty); await mkdir(occupied); await writeFile(join(occupied, 'keep.txt'), 'keep')
+    await expect(cleanupEmptyManagedDirectory(empty)).resolves.toBe(true)
+    await expect(access(empty)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(cleanupEmptyManagedDirectory(occupied)).resolves.toBe(false)
+    await expect(readFile(join(occupied, 'keep.txt'), 'utf8')).resolves.toBe('keep')
   })
 })

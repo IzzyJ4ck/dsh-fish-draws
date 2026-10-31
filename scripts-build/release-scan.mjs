@@ -6,9 +6,6 @@ if (packageJson.private === true) throw new Error('release package must not be p
 if (packageJson.name !== '@izzyj4ck/dsh-fish-draws') throw new Error('unexpected package name')
 if (packageJson.scripts?.prepare !== undefined || packageJson.scripts?.preinstall !== undefined || packageJson.scripts?.install !== undefined || packageJson.scripts?.postinstall !== undefined) throw new Error('release package must not run install-time build scripts')
 const licensing = JSON.parse(await readFile(new URL('assets/licensing/redistribution-status.json', root), 'utf8'))
-if (licensing.redistribution_approved !== true) {
-  throw new Error('PUBLIC RELEASE BLOCKED: third-party workflow/system-prompt redistribution permission is not documented; obtain written permission or independently rebuild/rewrite before npm publication')
-}
 for (const required of ['lib/index.js', 'lib/assets/skill/SKILL.md', 'lib/assets/references/system-prompt-t2i.md', 'lib/assets/references/system-prompt-edit.md', 'lib/assets/workflows/qwen21-unified-api.json', 'cordis.patch.yml', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'icon.svg']) {
   await access(new URL(required, root)).catch(() => { throw new Error(`required release asset is missing: ${required}`) })
 }
@@ -30,4 +27,8 @@ async function walk(directory) {
   }
 }
 await walk(new URL('../', import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/u, value => value.slice(1)))
+if (licensing.redistribution_approved !== true) {
+  console.log('release integrity, asset, and secret scans passed; public release remains blocked by the redistribution license gate')
+  throw new Error('PUBLIC RELEASE BLOCKED: third-party workflow/system-prompt redistribution permission is not documented; obtain written permission or independently rebuild/rewrite before npm publication')
+}
 console.log('release scan passed')

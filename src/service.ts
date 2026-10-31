@@ -18,6 +18,8 @@ import { readManifest, toManifest, writeManifestAtomic, type ResultManifest } fr
 import { preserveCandidate, removeManagedFile, cleanupEmptyCandidates, promoteOutput } from './runtime/retention.js'
 import { loadWorkflowTemplate } from './runtime/workflow-compiler.js'
 import { StrataVram } from './runtime/strata-vram.js'
+import { planPreflightReferences } from './runtime/preflight-references.js'
+import { normalizeExpandedPrompt } from './runtime/prompt-normalization.js'
 
 export type ReferenceSelector =
   | { kind: 'attachment'; user_turn_offset: number; image_index: number }
@@ -25,7 +27,7 @@ export type ReferenceSelector =
   | { kind: 'fish_draws_output'; execution_id: string; output_index: number }
 
 export interface PreflightInput {
-  task_id: string
+  task_id?: string
   mode: TaskMode
   original_prompt: string
   references: ReferenceSelector[]
@@ -74,23 +76,20 @@ export class FishDrawsService extends Service {
   async preflight(input: PreflightInput, agent: Agent, signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (this.config.comfy.root === '' || this.config.storage.outputRoot === '') throw new FishDrawsError('configure comfy.root before using fish-draws', 'CONFIGURATION_REQUIRED', 'preflight')
     if (this.config.strata.handoffEnabled && this.config.strata.vramEndpoint === undefined) throw new FishDrawsError('configure the loopback Strata VRAM endpoint or explicitly disable VRAM handoff', 'STRATA_CONFIGURATION_REQUIRED', 'preflight')
-    this.validateTaskId(input.task_id)
+    const taskId = input.task_id ?? this.newTaskId()
+    this.validateTaskId(taskId)
     if (input.mode === 't2i' && input.references.length !== 0) throw new FishDrawsError('t2i does not accept reference images', 'UNEXPECTED_REFERENCE', 'preflight')
     if (input.mode === 'edit' && (input.references.length < 1 || input.references.length > 6)) throw new FishDrawsError('edit requires one to six reference images', 'INVALID_REFERENCE_COUNT', 'preflight')
     const references = await this.resolveReferences(input.references, agent, signal)
-    const contentIndex = input.content_canvas_index ?? 0
-    if (contentIndex < 0 || contentIndex >= references.length) throw new FishDrawsError('content canvas index is outside the reference range', 'INVALID_CONTENT_CANVAS', 'preflight')
-    const normalized = references.length === 0 || contentIndex === 0 ? references : [references[contentIndex]!, ...references.filter((_, index) => index !== contentIndex)]
-    normalized.forEach((value, index) => { value.imageTag = `<image${index + 1}>` })
-    const normalizedSizeReference = input.size_reference_index === undefined ? undefined : normalized.indexOf(references[input.size_reference_index]!)
-    if (normalizedSizeReference !== undefined && normalizedSizeReference < 0) throw new FishDrawsError('size reference is outside the supplied image range', 'INVALID_SIZE_REFERENCE', 'preflight')
-    const canvas = resolveCanvas({ mode: input.mode, references: normalized, ...(input.target_width === undefined ? {} : { targetWidth: input.target_width }), ...(input.target_height === undefined ? {} : { targetHeight: input.target_height }), ...(input.aspect_ratio === undefined ? {} : { aspectRatio: input.aspect_ratio }), ...(normalizedSizeReference === undefined ? {} : { sizeReferenceIndex: normalizedSizeReference }) })
+    const planned = planPreflightReferences(input.mode, references, input.content_canvas_index, input.size_reference_index)
+    const normalized = planned.references
+    const canvas = resolveCanvas({ mode: input.mode, references: normalized, ...(input.target_width === undefined ? {} : { targetWidth: input.target_width }), ...(input.target_height === undefined ? {} : { targetHeight: input.target_height }), ...(input.aspect_ratio === undefined ? {} : { aspectRatio: input.aspect_ratio }), ...(planned.sizeReferenceIndex === undefined ? {} : { sizeReferenceIndex: planned.sizeReferenceIndex }) })
     if (input.size_reference_index !== undefined) canvas.sizeSource = `reference-upload:${input.size_reference_index + 1}`
     const acceleration = input.acceleration ?? ((input.count ?? 1) > 1 ? 'fast' : 'balanced')
     const profileName = safetyProfileName(input.mode, normalized.length, acceleration, input.count ?? 1)
     const profile = this.config.safety[profileName]
     const base = {
-      taskId: input.task_id, mode: input.mode, originalPrompt: input.original_prompt, references: normalized,
+      taskId, mode: input.mode, originalPrompt: input.original_prompt, references: normalized,
       targetWidth: canvas.targetWidth, targetHeight: canvas.targetHeight, sampleWidth: canvas.sampleWidth, sampleHeight: canvas.sampleHeight,
       sizeSource: canvas.sizeSource, outpaintingRequired: canvas.outpaintingRequired, safetyProfile: profileName,
       oversizeConfirmationRequired: !canvasWithinProfile(canvas, profile), visualFacts: input.visual_facts ?? [], uncertainties: input.uncertainties ?? [],
@@ -98,15 +97,14 @@ export class FishDrawsService extends Service {
     }
     const { createdAtUtc: _createdAtUtc, ...contract } = base
     const digest = createHash('sha256').update(JSON.stringify({ ...contract, references: base.references.map(({ path: _path, ...value }) => value) })).digest('hex')
-    const existing = this.tasks.get(input.task_id) ?? await this.findTask(input.task_id)
+    const existing = this.tasks.get(taskId) ?? await this.findTask(taskId)
     if (existing !== undefined) {
       const manifest = await readManifest(join(existing.taskDirectory, 'result.json'))
       if (manifest.contract_hash !== digest) throw new FishDrawsError('task_id already belongs to a different immutable request contract', 'TASK_ID_CONFLICT', 'preflight')
     }
     const record: PreflightRecord = { ...base, digest }
-    this.preflights.set(input.task_id, record)
-    await mkdir(join(this.runtimeRoot, 'preflight'), { recursive: true })
-    await writeFile(join(this.runtimeRoot, 'preflight', `${input.task_id}.json`), JSON.stringify(record), { encoding: 'utf8', flag: 'w' })
+    signal?.throwIfAborted()
+    this.preflights.set(taskId, record)
     return this.publicPreflight(record)
   }
 
@@ -115,19 +113,30 @@ export class FishDrawsService extends Service {
     if (preflight === undefined || preflight.digest !== input.preflight_digest) throw new FishDrawsError('preflight is missing or changed', 'PREFLIGHT_MISMATCH', 'preflight')
     if (preflight.complexConfirmationRequired && input.complex_task_confirmed !== true) throw new FishDrawsError('complex task facts and expanded prompt require confirmation', 'CONFIRMATION_REQUIRED', 'preflight')
     if (preflight.oversizeConfirmationRequired && input.allow_oversize !== true) throw new FishDrawsError('sampling canvas exceeds the approved profile and requires confirmation', 'OVERSIZE_CONFIRMATION_REQUIRED', 'preflight')
+    const normalizedInput: GenerateInput = { ...input, expanded_prompt: normalizeExpandedPrompt(input.expanded_prompt) }
     const executionId = randomUUID()
     const prior = this.records.get(input.task_id) ?? await this.previousRecord(input.task_id)
-    const record = this.newTaskRecord(preflight, input, executionId, prior)
+    const record = this.newTaskRecord(preflight, normalizedInput, executionId, prior)
     const owner = agent.id
     const controller = new AbortController()
     const jobId = this.ctx.jobs.start({
       kind: 'fish-draws', label: `${preflight.mode} ${preflight.targetWidth}x${preflight.targetHeight}`, owner,
       ...(toolCall === undefined ? {} : { toolCall: { callId: toolCall.callId as any, rootCallId: toolCall.rootCallId as any } }),
       run: (job: JobHandle) => {
-        const done = this.runJob(record, preflight, input, job, controller.signal)
-        return { cancel: reason => { controller.abort(new Error(reason ?? 'cancelled')); this.executor.cancel(record.taskId, reason) }, done }
+        const done = this.runJob(record, preflight, normalizedInput, job, controller.signal)
+        return {
+          cancel: reason => {
+            const cancellation = new FishDrawsError(reason ?? 'cancelled', 'CANCELLED', 'cancelled')
+            job.updateProgress('cancelling')
+            if (!controller.signal.aborted) controller.abort(cancellation)
+            this.executor.cancel(record.taskId, reason)
+          },
+          done,
+        }
       },
     })
+    this.preflights.delete(record.taskId)
+    await rm(join(this.runtimeRoot, 'preflight', `${record.taskId}.json`), { force: true })
     this.tasks.set(record.taskId, { createdAtUtc: record.createdAtUtc, taskDirectory: this.executor.taskDirectory(record.taskId, record.createdAtUtc), executionId })
     return { jobId, taskId: record.taskId, executionId, status: 'queued' }
   }
@@ -150,8 +159,7 @@ export class FishDrawsService extends Service {
     const path = join(index.taskDirectory, 'result.json'); const manifest = await readManifest(path)
     if (manifest.status !== 'awaiting_selection') throw new FishDrawsError('task is not awaiting a selection', 'INVALID_SELECTION_STATE', 'preflight')
     if (decision === 'continue') { await writeManifestAtomic(path, manifest); return manifest }
-    const chosen = decision === 'adopt' ? selections.map(selection => manifest.candidates.filter(value => value.execution_id === selection.execution_id)[selection.output_index]) : []
-    if (decision === 'adopt' && (chosen.length === 0 || chosen.some(value => value === undefined))) throw new FishDrawsError('selection does not identify valid candidates', 'INVALID_SELECTION', 'preflight')
+    const chosen = decision === 'adopt' ? this.resolveCandidateSelections(manifest, selections) : []
     manifest.outputs = []
     if (decision === 'adopt') {
       for (let indexOut = 0; indexOut < chosen.length; indexOut += 1) {
@@ -159,6 +167,7 @@ export class FishDrawsService extends Service {
         const promoted = await promoteOutput({ source: join(index.taskDirectory, value.relative_path), taskDirectory: index.taskDirectory, outputIndex: indexOut + 1, seed: value.seed, executionId: value.execution_id, targetWidth: value.width, targetHeight: value.height })
         manifest.outputs.push({ relative_path: promoted.relativePath, width: promoted.width, height: promoted.height, seed: promoted.seed, sha256: promoted.sha256 })
       }
+      manifest.quality.adopted_execution_id = chosen[0]!.execution_id
     }
     const unchosen = manifest.candidates.filter(candidate => !chosen.some(value => value?.relative_path === candidate.relative_path))
     if (decision === 'abandon' || !this.config.storage.retainAllSuccessfulCandidates) {
@@ -171,13 +180,37 @@ export class FishDrawsService extends Service {
     await cleanupEmptyCandidates(index.taskDirectory); await writeManifestAtomic(path, manifest); return manifest
   }
 
-  async diagnose(): Promise<Record<string, unknown>> { await this.retryCleanupJournal(); return diagnostics(this.config, this.lifecycle, this.runtimeRoot) }
+  private resolveCandidateSelections(manifest: ResultManifest, selections: Array<{ execution_id: string; output_index: number }>): ResultManifest['candidates'] {
+    if (selections.length === 0) throw new FishDrawsError('adopt requires at least one candidate selection', 'INVALID_SELECTION', 'preflight')
+    const executionIds = new Set(selections.map(value => value.execution_id))
+    if (executionIds.size !== 1) throw new FishDrawsError('all adopted outputs must come from the same execution', 'MIXED_SELECTION_EXECUTIONS', 'preflight')
+    const chosen = selections.map(selection => {
+      if (!Number.isSafeInteger(selection.output_index) || selection.output_index < 0) throw new FishDrawsError('selection output_index must be a zero-based non-negative integer', 'INVALID_SELECTION_INDEX', 'preflight')
+      const candidates = manifest.candidates.filter(value => value.execution_id === selection.execution_id)
+      const candidate = candidates[selection.output_index]
+      if (candidate === undefined) throw new FishDrawsError('selection does not identify a candidate at that zero-based output_index', 'INVALID_SELECTION', 'preflight')
+      return candidate
+    })
+    if (new Set(chosen.map(value => value.relative_path)).size !== chosen.length) throw new FishDrawsError('the same candidate cannot be adopted more than once', 'DUPLICATE_SELECTION', 'preflight')
+    return chosen
+  }
+
+  async diagnose(): Promise<Record<string, unknown>> { await this.cleanupLegacyPreflights(); await this.retryCleanupJournal(); return diagnostics(this.config, this.lifecycle, this.runtimeRoot) }
   async recoverLifecycle(): Promise<void> {
+    await this.cleanupLegacyPreflights()
     if (!this.config.strata.handoffEnabled || this.config.strata.vramEndpoint === undefined) return
     const strata = new StrataVram(this.config.strata.vramEndpoint, this.config.strata.credentialRef, this.ctx.credentials, join(this.runtimeRoot, 'strata-vram-journal.json'))
     await strata.recover()
   }
-  async dispose(): Promise<void> { await this.lifecycle.stopOwned() }
+  async dispose(): Promise<void> {
+    this.preflights.clear()
+    await this.cleanupLegacyPreflights()
+    await this.lifecycle.stopOwned()
+  }
+
+  private async cleanupLegacyPreflights(): Promise<void> {
+    await rm(join(this.runtimeRoot, 'preflight'), { recursive: true, force: true })
+  }
 
   private async retryCleanupJournal(): Promise<void> {
     const root = join(this.runtimeRoot, 'cleanup-journal')
@@ -204,10 +237,9 @@ export class FishDrawsService extends Service {
 
   private async runJob(record: TaskRecord, preflight: PreflightRecord, input: GenerateInput, job: JobHandle, signal: AbortSignal) {
     try {
-      signal.throwIfAborted(); const profile = this.config.safety[preflight.safetyProfile as keyof ResolvedConfig['safety']]
-      const final = await this.executor.execute({ record, references: preflight.references, count: input.count ?? 1, seed: input.seed ?? -1, reserveMiB: profile.reserveMiB, retainAllCandidates: this.config.storage.retainAllSuccessfulCandidates, formalBatch: input.formal_batch ?? (input.count ?? 1) > 1, allowOversize: input.allow_oversize ?? false, pauseForSelection: (input.no_improvement_rounds ?? 0) >= 2 }, value => { job.updateProgress(value.detail === undefined ? value.phase : `${value.phase}: ${value.detail}`) })
+      const profile = this.config.safety[preflight.safetyProfile as keyof ResolvedConfig['safety']]
+      const final = await this.executor.execute({ record, references: preflight.references, count: input.count ?? 1, seed: input.seed ?? -1, reserveMiB: profile.reserveMiB, retainAllCandidates: this.config.storage.retainAllSuccessfulCandidates, formalBatch: input.formal_batch ?? (input.count ?? 1) > 1, allowOversize: input.allow_oversize ?? false, pauseForSelection: (input.no_improvement_rounds ?? 0) >= 2 }, value => { job.updateProgress(value.detail === undefined ? value.phase : `${value.phase}: ${value.detail}`) }, signal)
       this.records.set(record.taskId, final)
-      await rm(join(this.runtimeRoot, 'preflight', `${record.taskId}.json`), { force: true }); this.preflights.delete(record.taskId)
       return final.status === 'failed' ? { status: 'failed' as const, ...(final.failure?.message === undefined ? {} : { detail: final.failure.message }) } : final.status === 'cancelled' ? { status: 'killed' as const } : { status: 'completed' as const, result: JSON.stringify({ task_id: final.taskId, execution_id: final.executionId, status: final.status }) }
     } catch (error) { return { status: signal.aborted ? 'killed' as const : 'failed' as const, detail: error instanceof Error ? error.message : String(error) } }
   }
@@ -217,6 +249,7 @@ export class FishDrawsService extends Service {
   }
 
   private async resolveReferences(selectors: ReferenceSelector[], agent: Agent, signal?: AbortSignal): Promise<ResolvedReference[]> {
+    if (selectors.length === 0) return []
     const cwd = await this.ctx.workingDirectory.ensure(agent, signal)
     const values: ResolvedReference[] = []
     for (let index = 0; index < selectors.length; index += 1) {
@@ -253,6 +286,7 @@ export class FishDrawsService extends Service {
     return ref
   }
   private publicPreflight(record: PreflightRecord): Record<string, unknown> { return { task_id: record.taskId, mode: record.mode, references: record.references.map(({ path: _path, ...value }) => value), target_width: record.targetWidth, target_height: record.targetHeight, sample_width: record.sampleWidth, sample_height: record.sampleHeight, size_source: record.sizeSource, outpainting_required: record.outpaintingRequired, safety_profile: record.safetyProfile, oversize_confirmation_required: record.oversizeConfirmationRequired, visual_facts: record.visualFacts, uncertainties: record.uncertainties, complex_confirmation_required: record.complexConfirmationRequired, preflight_digest: record.digest } }
+  private newTaskId(): string { return `fish-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}` }
   private validateTaskId(value: string): void { if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{7,63}$/u.test(value)) throw new FishDrawsError('task_id must be 8-64 safe identifier characters', 'INVALID_TASK_ID', 'preflight') }
   private async findTask(taskId: string): Promise<TaskIndex | undefined> {
     for (const date of await (await import('node:fs/promises')).readdir(join(this.config.storage.outputRoot, 'fish-draws')).catch(() => [])) {

@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { copyFile, mkdir, open, rename, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdir, open, rename, rm, rmdir, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -52,7 +52,16 @@ export async function removeManagedFile(path: string, taskDirectory: string): Pr
 
 export async function cleanupEmptyCandidates(taskDirectory: string): Promise<void> {
   const directory = join(taskDirectory, 'candidates')
-  try { if ((await stat(directory)).isDirectory()) await rm(directory, { recursive: false }) } catch { /* non-empty or absent */ }
+  try { if ((await stat(directory)).isDirectory()) await rmdir(directory) } catch { /* non-empty or absent */ }
+}
+
+export async function cleanupEmptyManagedDirectory(directory: string): Promise<boolean> {
+  try { await rmdir(directory); return true }
+  catch (error: any) {
+    if (error?.code === 'ENOENT') return true
+    if (error?.code === 'ENOTEMPTY' || error?.code === 'EEXIST') return false
+    throw error
+  }
 }
 
 export function sourceFilename(record: { filename: string }): string { return basename(record.filename) }
