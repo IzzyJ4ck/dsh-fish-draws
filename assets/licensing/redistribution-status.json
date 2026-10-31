@@ -1,9 +1,18 @@
 {
   "schema_version": 1,
-  "redistribution_approved": false,
-  "basis": "pending",
+  "redistribution_approved": true,
+  "basis": "written_permission_with_attribution",
   "source_video": "https://www.bilibili.com/video/BV1HVhX6AEC6/",
-  "runninghub_source": null,
-  "authorization_record": null,
-  "reviewed_at_utc": null
+  "runninghub_source": "https://www.runninghub.ai/zh-cn/post/2103708646000660481/?inviteCode=rh-v1315",
+  "author": "Zove-try",
+  "attribution_required": true,
+  "scope": [
+    "modification",
+    "public_redistribution",
+    "github_packaging",
+    "npm_packaging",
+    "commercial_use"
+  ],
+  "authorization_record": "AUTHORIZATION.md",
+  "reviewed_at_utc": "2026-10-31T00:23:27Z"
 }

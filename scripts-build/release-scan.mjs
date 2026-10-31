@@ -6,7 +6,7 @@ if (packageJson.private === true) throw new Error('release package must not be p
 if (packageJson.name !== '@izzyj4ck/dsh-fish-draws') throw new Error('unexpected package name')
 if (packageJson.scripts?.prepare !== undefined || packageJson.scripts?.preinstall !== undefined || packageJson.scripts?.install !== undefined || packageJson.scripts?.postinstall !== undefined) throw new Error('release package must not run install-time build scripts')
 const licensing = JSON.parse(await readFile(new URL('assets/licensing/redistribution-status.json', root), 'utf8'))
-for (const required of ['lib/index.js', 'lib/assets/skill/SKILL.md', 'lib/assets/references/system-prompt-t2i.md', 'lib/assets/references/system-prompt-edit.md', 'lib/assets/workflows/qwen21-unified-api.json', 'cordis.patch.yml', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'icon.svg']) {
+for (const required of ['lib/index.js', 'lib/assets/skill/SKILL.md', 'lib/assets/references/system-prompt-t2i.md', 'lib/assets/references/system-prompt-edit.md', 'lib/assets/workflows/qwen21-unified-api.json', 'lib/assets/licensing/AUTHORIZATION.md', 'lib/assets/licensing/redistribution-status.json', 'cordis.patch.yml', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'icon.svg']) {
   await access(new URL(required, root)).catch(() => { throw new Error(`required release asset is missing: ${required}`) })
 }
 const forbiddenNames = new Set(['.env', '.npmrc'])

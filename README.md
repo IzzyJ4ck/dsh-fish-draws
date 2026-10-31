@@ -2,7 +2,7 @@
 
 DSH Host bundle for controlled local Qwen Image 2.1 generation and editing through ComfyUI. It embeds the `fish-draws` skill, fixed workflow compiler, jobs, exact-size output validation, VRAM handoff, lifecycle management, and authoritative output retention.
 
-> **Public release is currently blocked.** The bundled workflow and prompt references evolved from material shared by a Bilibili/RunningHub author. Local development may continue, but npm/GitHub redistribution must wait for written permission covering modification, public redistribution, packaging, commercial use and attribution, or for an independently rebuilt workflow and independently rewritten prompts. See `THIRD_PARTY_NOTICES.md` and `assets/licensing/redistribution-status.json`.
+> **Attribution:** The bundled workflow and prompt references evolved from material shared by **Zove-try**, who granted written permission for modification, GitHub/npm redistribution, and commercial use with attribution. See `THIRD_PARTY_NOTICES.md` and `assets/licensing/AUTHORIZATION.md` for the source and scoped authorization record.
 
 ## Supported environment
 

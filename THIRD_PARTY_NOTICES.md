@@ -7,25 +7,26 @@ workflow or prompt material.
 ## Qwen Image 2.1 workflow and prompt references
 
 - Known explanatory source: <https://www.bilibili.com/video/BV1HVhX6AEC6/>
+- Original shared workflow: <https://www.runninghub.ai/zh-cn/post/2103708646000660481/?inviteCode=rh-v1315>
+- Original author and required attribution: **Zove-try**
 - The current `qwen21-unified-api.json` evolved from a workflow shared for free
-  by the video's author through RunningHub.
+  by Zove-try through RunningHub.
 - The current system-prompt references were informed by text shared with that
   workflow.
-- The exact RunningHub artifact URL and a written redistribution grant have not
-  yet been recorded.
+- The project owner requested written permission covering modification, public
+  redistribution, GitHub/npm packaging, commercial use, and attribution.
+- Zove-try granted that request in writing with the reply: “可以哦，标注一下我的名字即可”
+  (permission granted, with attribution required).
+- A scoped authorization summary is retained in
+  `assets/licensing/AUTHORIZATION.md` and is included in the published bundle.
 
 ### Current status
 
-Public redistribution is **not cleared**. Local development and testing are
-allowed by the project owner, but this package must not be publicly published
-until one of the following is complete:
+Public redistribution of the workflow-derived material and prompt references
+is cleared on the basis of the written permission summarized above, subject to
+attribution to **Zove-try**. This notice does not grant rights to separately
+licensed models, ComfyUI, custom nodes, or other third-party software; those
+components are not bundled by this package.
 
-1. The original author provides written permission covering modification,
-   public redistribution, packaging on GitHub/npm, commercial use, and any
-   attribution requirements; or
-2. The workflow is independently rebuilt from clearly licensed official
-   materials and both system prompts are rewritten from scratch.
-
-The machine-readable gate is stored in
-`assets/licensing/redistribution-status.json`. Release checks must fail while
-`redistribution_approved` is false.
+The machine-readable review record is stored in
+`assets/licensing/redistribution-status.json`.
