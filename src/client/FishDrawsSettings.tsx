@@ -5,7 +5,7 @@ import { Button, Input, SegmentedTabs, Switch } from '@deepseek-ai/dsh-client-ui
 import type { ConfigValues, DiagnosticModelRouteConfig, ModelProfileConfig } from '../config.js'
 import type { ModelCandidates, SettingsOverview } from '../settings-remote/types.js'
 import { cloneConfig, type Drafts, type SettingsTab, useConfigSnapshot } from './state.js'
-import { validateComfyDraft, validateProfiles } from './validation.js'
+import { validateComfyDraft, validateDiagnosticsDraft, validateProfiles, validateStrataDraft } from './validation.js'
 const styles = { root: 'fd-root', tabs: 'fd-tabs', panel: 'fd-panel', grid: 'fd-grid', field: 'fd-field', fieldWide: 'fd-field-wide', actions: 'fd-actions', status: 'fd-status' } as const
 const STYLE = `.fd-root{display:grid;gap:16px;max-width:920px;padding:4px 2px 28px}.fd-tabs{max-width:680px}.fd-panel{display:grid;gap:14px}.fd-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.fd-field{display:grid;gap:6px;font-size:13px}.fd-field-wide{grid-column:1/-1}.fd-actions{display:flex;flex-wrap:wrap;gap:8px}.fd-status{padding:10px 12px;border:1px solid var(--dsw-alias-border-subtle);border-radius:10px;white-space:pre-wrap}@media(max-width:760px){.fd-grid{grid-template-columns:1fr}}`
 const openStreams = new Set<{ dispose(): void }>()
@@ -31,7 +31,9 @@ export function FishDrawsSettings({ ctx, form }: FishDrawsSettingsProps) {
 
   function update(next: ConfigValues): void { setDrafts(current => ({ ...current, [tab]: next })) }
   async function save(keys: string[]): Promise<void> {
-    const issues = tab === 'comfy' ? validateComfyDraft(readyDraft) : tab === 'models' ? validateProfiles(readyDraft.modelProfiles ?? [], readyDraft.currentModelProfileId ?? '') : []
+    const issues = tab === 'comfy' ? validateComfyDraft(readyDraft)
+      : tab === 'models' ? validateProfiles(readyDraft.modelProfiles ?? [], readyDraft.currentModelProfileId ?? '')
+      : tab === 'strata' ? validateStrataDraft(readyDraft) : validateDiagnosticsDraft(readyDraft)
     if (issues.length > 0) { setMessage(issues.map(value => `${value.field}: ${value.message}`).join('\n')); return }
     let valueToSave = readyDraft; let keysToSave = keys
     if (tab === 'models') {

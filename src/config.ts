@@ -149,7 +149,12 @@ const baseConfig = z.object({
   migration: z.object({ legacyMirrorHash: z.string().max(64) }).default({}).volatile(),
 })
 
-export const Config = z.transform(baseConfig, (value) => { resolveConfig(value as unknown as RuntimeConfig); return value }) as unknown as z<ConfigValues, RuntimeConfig>
+// Volatile fields must be direct children of a fixed object schema in Schemastery 3.18.
+// Wrapping this object in z.transform() makes the transform's `*` inner path dynamic and
+// causes DSH Settings to reject every volatile child before the plugin can activate.
+// Cross-field invariants remain enforced by resolveConfig() at Host activation, preflight,
+// diagnostics, and every Settings-backed runtime snapshot.
+export const Config = baseConfig as unknown as z<ConfigValues, RuntimeConfig>
 
 export interface ResolvedSafetyProfile {
   maxSampleWidth: number

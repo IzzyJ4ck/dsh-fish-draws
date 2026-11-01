@@ -22,3 +22,24 @@ export function validateProfiles(profiles: ModelProfileConfig[], current: string
   }
   return issues
 }
+
+export function validateStrataDraft(value: ConfigValues): ValidationIssue[] {
+  const strata = value.strata ?? {}
+  const issues: ValidationIssue[] = []
+  if (strata.handoffEnabled !== false) {
+    if ((strata.vramEndpoint ?? '').trim() === '') issues.push({ field: 'strata.vramEndpoint', message: 'A loopback Strata endpoint is required while VRAM handoff is enabled.' })
+    else if (!isLoopbackUrl(strata.vramEndpoint!)) issues.push({ field: 'strata.vramEndpoint', message: 'Only loopback URLs are allowed.' })
+  }
+  if ((strata.authMode ?? 'bearer') === 'bearer' && (strata.credentialRef ?? '').trim() === '') issues.push({ field: 'strata.credentialRef', message: 'A credential reference is required for bearer authentication.' })
+  return issues
+}
+
+export function validateDiagnosticsDraft(value: ConfigValues): ValidationIssue[] {
+  const routes = value.diagnostics?.localModelRoutes ?? []
+  const keys = routes.map(route => `${route.provider}\0${route.model}\0${route.reasoningEffort ?? ''}`)
+  return new Set(keys).size === keys.length ? [] : [{ field: 'diagnostics.localModelRoutes', message: 'Diagnostic routes must be unique.' }]
+}
+
+function isLoopbackUrl(value: string): boolean {
+  try { return ['localhost', '127.0.0.1', '[::1]', '::1'].includes(new URL(value).hostname) } catch { return false }
+}

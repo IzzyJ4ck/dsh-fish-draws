@@ -1,7 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { hashLegacyMirror, legacyModelProfile, resolveConfig } from '../src/config.js'
+import { Config, hashLegacyMirror, legacyModelProfile, resolveConfig } from '../src/config.js'
 
 describe('public v1 endpoint boundary', () => {
+  it('activates the Settings schema with top-level volatile fields on Schemastery 3.18', () => {
+    const runtime = Config({})
+    expect(runtime.configSchemaVersion.get()).toBe(2)
+    expect(runtime.comfy.get()).toMatchObject({ apiUrl: 'http://127.0.0.1:8188', autoStart: true })
+    expect(runtime.modelProfiles.get()).toEqual([])
+  })
+
+  it('accepts a 3.0-shaped profile patch before the 3.1 migration runs', () => {
+    const runtime = Config({
+      comfy: { root: 'E:\\ComfyUI\\ComfyUI', apiUrl: 'http://127.0.0.1:8188' },
+      models: { unetName: 'model.gguf', clipName: 'clip.safetensors', vaeName: 'vae.safetensors' },
+      strata: { vramEndpoint: 'http://127.0.0.1:8000', credentialRef: 'FISH_DRAWS_STRATA_API_KEY', reserveMiB: 21_504 },
+      safety: { t2iBalanced: { maxSampleWidth: 2560, maxSampleHeight: 2560, maxSamplePixels: 3_686_400, reserveMiB: 21_504, approvalSource: 'user_override' } },
+    })
+    const resolved = resolveConfig(runtime)
+    expect(resolved.migrationRequired).toBe(true)
+    expect(resolved.currentModelProfile.files.unetName).toBe('model.gguf')
+  })
+
   it('accepts loopback and rejects remote ComfyUI/Strata URLs', () => {
     expect(resolveConfig({ comfy: { apiUrl: 'http://127.0.0.1:8188' } }).comfy.apiUrl.hostname).toBe('127.0.0.1')
     expect(() => resolveConfig({ comfy: { apiUrl: 'http://192.168.1.2:8188' } })).toThrow(/loopback/u)
