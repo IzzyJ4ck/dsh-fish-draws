@@ -54,4 +54,15 @@ describe('ComfyUI lifecycle shutdown', () => {
     process.removeListener('unhandledRejection', onUnhandled)
     expect(unhandled).toBe(false)
   })
+
+  it('clears a persisted owner record only after its pid is confirmed absent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fish-comfy-stale-owner-'))
+    const ownerPath = join(root, 'comfy-owner.json')
+    await writeFile(ownerPath, '{"schema_version":1,"pid":2147483647}')
+    const lifecycle = new ComfyLifecycle(resolveConfig())
+    Object.assign(lifecycle.client, { online: async () => undefined })
+    await expect(lifecycle.ensureOnline(root)).resolves.toEqual({ startedByPlugin: false })
+    await expect(access(ownerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(lifecycle.ownership).toBe('user-or-external')
+  })
 })

@@ -93,4 +93,18 @@ describe('FishDrawsService T2I preflight regression', () => {
 
     await expect(access(join(runtimeRoot, 'preflight'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  it('binds a diagnostic session to its fixed T2I contract and blocks formal preflight races', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fish-draws-diagnostic-preflight-')); roots.push(root)
+    const config = resolveConfig({
+      comfy: { root: join(root, 'comfy') }, storage: { outputRoot: join(root, 'output') }, strata: { handoffEnabled: false },
+      diagnostics: { localModelRoutes: [{ provider: 'local', model: 'model', userConfirmedLocal: true, status: 'unverified' }] },
+    })
+    const ctx = new Context(); ctx.provide('credentials', { resolve: async () => undefined })
+    const service = new FishDrawsService(ctx, config, join(root, 'runtime'))
+    await service.diagnosticsRunner.prepare({ runId: 'diag-preflight-01', sessionId: 'diagnostic-agent', provider: 'local', model: 'model', profileId: config.currentModelProfileId })
+    await expect(service.preflight({ mode: 't2i', original_prompt: 'wrong size', references: [], target_width: 1024, target_height: 768 }, { id: 'diagnostic-agent' } as any)).rejects.toThrow(/fixed 1024x1024/u)
+    await expect(service.preflight({ mode: 't2i', original_prompt: 'fixed', references: [], target_width: 1024, target_height: 1024, acceleration: 'balanced', count: 1 }, { id: 'diagnostic-agent' } as any)).resolves.toMatchObject({ target_width: 1024, target_height: 1024 })
+    await expect(service.preflight({ mode: 't2i', original_prompt: 'formal race', references: [], target_width: 1024, target_height: 1024 }, { id: 'other-agent' } as any)).rejects.toThrow(/diagnostic owns/u)
+  })
 })

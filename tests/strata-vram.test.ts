@@ -7,7 +7,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))))
 })
 
-async function strataFor(handler: Parameters<typeof createServer>[0]): Promise<StrataVram> {
+async function strataFor(handler: Parameters<typeof createServer>[0], authMode: 'none' | 'bearer' = 'bearer'): Promise<StrataVram> {
   const server = createServer(handler)
   servers.push(server)
   await new Promise<void>((resolve, reject) => {
@@ -20,6 +20,8 @@ async function strataFor(handler: Parameters<typeof createServer>[0]): Promise<S
     new URL(`http://127.0.0.1:${address.port}`),
     'TEST_STRATA_KEY',
     { resolve: async () => ({ value: 'test-only-secret' }) } as any,
+    undefined,
+    authMode,
   )
 }
 
@@ -66,5 +68,16 @@ describe('Strata VRAM handoff', () => {
     })
     await expect(strata.waitIdle(undefined, 100, 5)).resolves.toMatchObject({ activity: { in_flight: 0 } })
     expect(calls).toBe(2)
+  })
+
+  it('does not resolve or send a credential in none mode', async () => {
+    let authorization: string | undefined
+    const strata = await strataFor((request, response) => {
+      authorization = request.headers.authorization
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ loaded: true, activity: { in_flight: 0 }, vram: { elastic: true } }))
+    }, 'none')
+    await expect(strata.status()).resolves.toMatchObject({ loaded: true })
+    expect(authorization).toBeUndefined()
   })
 })

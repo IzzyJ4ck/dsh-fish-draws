@@ -90,6 +90,8 @@ Track consecutive no-improvement rounds separately from total quality cycles. Pa
 
 ## Retention and safety
 
+When the settings page starts an isolated diagnostic session, follow its fixed request exactly: T2I, no references, 1024×1024, Balanced, Count 1, 20 steps, no quality rework. Do not substitute another model profile, route, size, seed batch, or task. The Host binds that session to a captured diagnostic profile and rejects any broader contract.
+
 The Host owns output promotion, `result.json`, candidate retention, ComfyUI model unloading, Strata restoration, cleanup, and ten-minute idle shutdown for plugin-owned ComfyUI. Never delete task directories yourself. Never close a user-started ComfyUI process.
 
 Use `fish_draws_diagnose` for configuration or lifecycle failures. Its report is deliberately redacted.
