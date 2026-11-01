@@ -3,12 +3,20 @@ import type { WorkflowGraph } from './workflow-compiler.js'
 
 export interface ComfyImageRecord { filename: string; subfolder: string; type: string }
 
-interface ComfyDeviceStats {
+export interface ComfyDeviceStats {
   type?: string
+  name?: string
   torch_vram_total?: number
+  vram_total?: number
+  vram_free?: number
 }
 
-interface ComfySystemStats { devices?: ComfyDeviceStats[] }
+export interface ComfySystemStats {
+  devices?: ComfyDeviceStats[]
+  system?: { comfyui_version?: string; python_version?: string; os?: string }
+}
+
+export interface ComfyQueueState { running: number; pending: number; idle: boolean }
 
 const MAX_UNLOADED_TORCH_VRAM_BYTES = 512 * 1024 * 1024
 
@@ -35,9 +43,14 @@ export class ComfyClient {
 
   online(signal?: AbortSignal): Promise<unknown> { return this.systemStats(signal) }
   systemStats(signal?: AbortSignal): Promise<ComfySystemStats> { return this.request('/system_stats', signal === undefined ? {} : { signal }, 5_000) }
-  async queueIdle(signal?: AbortSignal): Promise<boolean> {
+  async queueState(signal?: AbortSignal): Promise<ComfyQueueState> {
     const queue = await this.request<{ queue_running?: unknown[]; queue_pending?: unknown[] }>('/queue', signal === undefined ? {} : { signal }, 15_000)
-    return (queue.queue_running?.length ?? 0) === 0 && (queue.queue_pending?.length ?? 0) === 0
+    const running = queue.queue_running?.length ?? 0
+    const pending = queue.queue_pending?.length ?? 0
+    return { running, pending, idle: running === 0 && pending === 0 }
+  }
+  async queueIdle(signal?: AbortSignal): Promise<boolean> {
+    return (await this.queueState(signal)).idle
   }
   async waitIdle(timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
     const deadline = Date.now() + timeoutMs

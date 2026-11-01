@@ -1,0 +1,11 @@
+.root { display: grid; gap: 16px; max-width: 920px; padding: 4px 2px 28px; }
+.tabs { max-width: 680px; }
+.panel { display: grid; gap: 14px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.field { display: grid; gap: 6px; font-size: 13px; }
+.fieldWide { grid-column: 1 / -1; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.status { padding: 10px 12px; border: 1px solid var(--dsw-alias-border-subtle); border-radius: 10px; white-space: pre-wrap; }
+.error { color: var(--dsw-alias-text-danger); }
+.profile { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
+@media (max-width: 760px) { .grid, .profile { grid-template-columns: 1fr; } }

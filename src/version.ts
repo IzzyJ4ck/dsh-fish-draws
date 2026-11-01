@@ -1,5 +1,5 @@
-export const PLUGIN_VERSION = '3.0.0'
-export const EMBEDDED_SKILL_VERSION = '3.0.0'
+export const PLUGIN_VERSION = '3.1.0'
+export const EMBEDDED_SKILL_VERSION = '3.1.0'
 export const WORKFLOW_VERSION = 'qwen-image-2.1-unified-v3'
 export const RESULT_SCHEMA_VERSION = 1
 

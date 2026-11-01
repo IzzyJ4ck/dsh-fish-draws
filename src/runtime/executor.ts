@@ -27,7 +27,7 @@ export interface ExecutionProgress { phase: string; detail?: string }
 
 export class FishDrawsExecutor {
   private template?: WorkflowTemplate
-  private active: { taskId: string; controller: AbortController; promptId: string | undefined } | undefined
+  private active: { taskId: string; controller: AbortController; promptId: string | undefined; strataReleased: boolean } | undefined
   constructor(
     readonly config: ResolvedConfig,
     readonly lifecycle: ComfyLifecycle,
@@ -39,6 +39,7 @@ export class FishDrawsExecutor {
     if (this.active?.taskId === taskId) this.active.controller.abort(new FishDrawsError(reason, 'CANCELLED', 'cancelled'))
   }
   get activeTaskId(): string | undefined { return this.active?.taskId }
+  get strataReleased(): boolean { return this.active?.strataReleased ?? false }
 
   async execute(request: ExecutionRequest, progress: (value: ExecutionProgress) => void, externalSignal?: AbortSignal): Promise<TaskRecord> {
     if (this.active !== undefined) throw new FishDrawsError('another fish-draws task is active', 'TASK_BUSY', 'preflight')
@@ -48,7 +49,7 @@ export class FishDrawsExecutor {
     }
     if (externalSignal?.aborted) forwardCancellation()
     else externalSignal?.addEventListener('abort', forwardCancellation, { once: true })
-    this.active = { taskId: request.record.taskId, controller, promptId: undefined }
+    this.active = { taskId: request.record.taskId, controller, promptId: undefined, strataReleased: false }
     const signal = controller.signal
     const record = request.record
     const taskDirectory = this.taskDirectory(record.taskId, record.createdAtUtc)
@@ -56,7 +57,7 @@ export class FishDrawsExecutor {
     const activeLock = join(this.runtimeRoot, 'active-task.json')
     let activeLockAcquired = false
     let template = this.template
-    const strata = new StrataVram(this.config.strata.vramEndpoint, this.config.strata.credentialRef, this.credentials, join(this.runtimeRoot, 'strata-vram-journal.json'))
+    const strata = new StrataVram(this.config.strata.vramEndpoint, this.config.strata.credentialRef, this.credentials, join(this.runtimeRoot, 'strata-vram-journal.json'), this.config.strata.authMode)
     const stagedInputs = join(this.config.comfy.root, 'input', 'fish-draws', record.taskId, record.executionId)
     const stagedNames: string[] = []
     const workflowPath = join(this.runtimeRoot, 'workflows', `${record.executionId}.json`)
@@ -86,7 +87,7 @@ export class FishDrawsExecutor {
       }
 
       progress({ phase: 'strata_releasing' })
-      if (this.config.strata.handoffEnabled) await strata.release(request.reserveMiB, signal)
+      if (this.config.strata.handoffEnabled) { await strata.release(request.reserveMiB, signal); if (this.active !== undefined) this.active.strataReleased = true }
       let lastError: unknown
       const selectedSeed = request.seed < 0 ? randomInt(1, 2_147_483_647) : request.seed
       for (let attempt = 1; attempt <= 4; attempt += 1) {
@@ -140,6 +141,7 @@ export class FishDrawsExecutor {
       if (!record.comfyModelsUnloaded) throw new FishDrawsError('ComfyUI models could not be unloaded', 'COMFY_UNLOAD_FAILED', 'lifecycle')
       progress({ phase: 'strata_restoring' })
       record.strataRestored = await strata.restore(signal)
+      if (this.active !== undefined) this.active.strataReleased = false
       if (!record.strataRestored) throw new FishDrawsError('Strata reserve could not be restored', 'STRATA_RESTORE_FAILED', 'lifecycle')
       signal.throwIfAborted()
       record.completedAtUtc = new Date().toISOString()
@@ -149,6 +151,7 @@ export class FishDrawsExecutor {
       await this.lifecycle.client.interrupt(this.active?.promptId)
       record.comfyModelsUnloaded = await this.lifecycle.unloadModels().catch(() => false)
       record.strataRestored = await strata.restore().catch(() => false)
+      if (record.strataRestored && this.active !== undefined) this.active.strataReleased = false
       record.completedAtUtc = new Date().toISOString()
       record.status = signal.aborted ? 'cancelled' : 'failed'
       const typed = signal.aborted

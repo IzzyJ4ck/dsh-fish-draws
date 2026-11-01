@@ -14,6 +14,7 @@ export async function diagnostics(config: ResolvedConfig, lifecycle: ComfyLifecy
   if (config.storage.outputRoot !== '') {
     const taskRoot = join(config.storage.outputRoot, 'fish-draws')
     for (const date of await readdir(taskRoot).catch(() => [])) {
+      if (date === 'diagnostics') continue
       for (const task of await readdir(join(taskRoot, date)).catch(() => [])) {
         taskCount += 1
         try { const result = JSON.parse(await readFile(join(taskRoot, date, task, 'result.json'), 'utf8')) as { status?: string }; if (result.status === 'awaiting_selection') awaiting.push(task) } catch { /* diagnose counts incomplete directories separately through journals */ }
@@ -29,7 +30,7 @@ export async function diagnostics(config: ResolvedConfig, lifecycle: ComfyLifecy
     plugin_version: PLUGIN_VERSION, embedded_skill_version: EMBEDDED_SKILL_VERSION, workflow_version: WORKFLOW_VERSION,
     comfy_url: config.comfy.apiUrl.origin, comfy_online: await lifecycle.client.online().then(() => true, () => false), comfy_owned_by_plugin: lifecycle.owned,
     strata_configured: config.strata.vramEndpoint !== undefined, paths: pathState, output_root_configured: config.storage.outputRoot !== '',
-    required_nodes_checked: objectInfo !== undefined, missing_nodes: missingNodes, configured_model_filenames: config.models,
+    required_nodes_checked: objectInfo !== undefined, missing_nodes: missingNodes, current_model_profile_status: config.currentModelProfile.validation?.status ?? 'unverified',
     prompt_expansion_mode: config.promptExpansion.mode, current_agent_visual_capability: 'validated by skill preflight at task time',
     task_directories: taskCount, awaiting_selection_tasks: awaiting, cleanup_journal_items: cleanupJournalCount, legacy_skill_conflict: legacySkillConflict,
     note: 'Use fish_draws_result for task details. Absolute local paths are intentionally omitted.',

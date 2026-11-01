@@ -15,8 +15,10 @@
     "useUnknownInCatchVariables": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
+    "allowSyntheticDefaultImports": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["lib", "node_modules", "tests"]
+  "exclude": ["lib", "node_modules", "tests", "src/client"]
 }

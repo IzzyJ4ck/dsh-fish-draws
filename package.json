@@ -1,6 +1,6 @@
 {
   "name": "@izzyj4ck/dsh-fish-draws",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "A DSH bundle for controlled local Qwen Image 2.1 generation and editing through ComfyUI.",
   "keywords": [
     "deepseek-harness",
@@ -29,6 +29,22 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./types": {
+      "types": "./lib/settings-remote/types.d.ts",
+      "default": "./lib/settings-remote/types.js"
+    },
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -52,17 +68,25 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
   },
-  "dependencies": {},
   "scripts": {
     "clean": "node scripts-build/clean.mjs",
-    "build": "pnpm run clean && tsc -p tsconfig.json && node scripts-build/copy-assets.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm run clean && tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts-build/generate-typert.mjs && node scripts-build/build-client.mjs && node scripts-build/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "release:scan": "node scripts-build/release-scan.mjs",
@@ -78,20 +102,55 @@
     "@deepseek-ai/dsh-skill": ">=0.2.1-rc.3 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.3 <0.3.0",
     "@deepseek-ai/dsh-working-directory": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-api-remotes": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-api-session-controller": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-client-locale": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-client-ui-settings": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-settings": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.3 <0.3.0",
+    "react": "^18.2.0",
     "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-api-gateway": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-api-settings-controller": "0.2.1-rc.3",
     "@deepseek-ai/dsh-attachment": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-locale": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-store": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-test-runtime": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.3",
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.3",
     "@deepseek-ai/dsh-jobs": "0.2.1-rc.3",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-settings": "0.2.1-rc.3",
     "@deepseek-ai/dsh-skill": "0.2.1-rc.3",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-typert-generator": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.3",
     "@deepseek-ai/dsh-working-directory": "0.2.1-rc.3",
     "@deepseek-ai/schemastery": "3.18.5",
+    "@testing-library/react": "16.3.0",
     "@types/node": "^24.0.0",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "jsdom": "29.1.1",
+    "lightningcss": "1.33.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "tsdown": "0.22.2",
     "typescript": "^5.9.0",
     "vitest": "^3.2.4"
   }

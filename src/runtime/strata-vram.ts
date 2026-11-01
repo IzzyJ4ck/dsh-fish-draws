@@ -31,8 +31,15 @@ export class StrataVram {
   private priorReserve: number | undefined
   private priorExpertCacheMiB: number | undefined
   private released = false
-  constructor(private readonly endpoint: URL | undefined, private readonly credentialName: string, private readonly credentials: CredentialProvider, private readonly journalPath?: string) {}
+  constructor(
+    private readonly endpoint: URL | undefined,
+    private readonly credentialName: string,
+    private readonly credentials: CredentialProvider,
+    private readonly journalPath?: string,
+    private readonly authMode: 'none' | 'bearer' = 'bearer',
+  ) {}
   private async headers(): Promise<Record<string, string>> {
+    if (this.authMode === 'none') return { 'content-type': 'application/json' }
     const value = (await this.credentials.resolve(credentialRef(this.credentialName)))?.value
     if (value === undefined) throw new FishDrawsError('Strata credential is not configured', 'STRATA_CREDENTIAL_MISSING', 'preflight')
     return { authorization: `Bearer ${value}`, 'content-type': 'application/json' }
@@ -42,6 +49,9 @@ export class StrataVram {
     const response = await fetch(new URL(path.replace(/^\//, ''), this.endpoint.href.endsWith('/') ? this.endpoint : new URL(`${this.endpoint.href}/`)), { ...init, headers: { ...await this.headers(), ...init.headers }, signal: init.signal == null ? AbortSignal.timeout(330_000) : AbortSignal.any([AbortSignal.timeout(330_000), init.signal]) })
     if (!response.ok) throw new FishDrawsError(`Strata returned HTTP ${response.status}`, 'STRATA_HTTP', 'lifecycle', true)
     return await response.json() as T
+  }
+  async status(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>('/v1/status', signal === undefined ? {} : { signal })
   }
   async waitIdle(signal?: AbortSignal, timeoutMs = 90_000, pollIntervalMs = 1_000): Promise<Status> {
     const deadline = Date.now() + timeoutMs

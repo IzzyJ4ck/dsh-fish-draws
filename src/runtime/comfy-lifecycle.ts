@@ -33,13 +33,22 @@ export class ComfyLifecycle {
   private startedByPlugin = false
   constructor(private readonly config: ResolvedConfig) { this.client = new ComfyClient(config.comfy.apiUrl) }
   get owned(): boolean { return this.startedByPlugin }
+  get hasLiveOwnedHandle(): boolean { return this.startedByPlugin && this.child !== undefined && !this.childExited(this.child) }
+  get ownership(): 'plugin-owned-live-handle' | 'user-or-external' | 'stale-owner-record' | 'offline' {
+    if (this.hasLiveOwnedHandle) return 'plugin-owned-live-handle'
+    if (this.managedPid !== undefined && this.pidAlive(this.managedPid)) return 'stale-owner-record'
+    return 'user-or-external'
+  }
 
   async ensureOnline(runtimeRoot: string, signal?: AbortSignal): Promise<{ startedByPlugin: boolean }> {
     this.ownerPath = join(runtimeRoot, 'comfy-owner.json')
     try {
       await this.client.online(signal)
       const owner = await this.readOwner()
-      if (owner !== undefined && this.pidAlive(owner.pid)) { this.managedPid = owner.pid; this.startedByPlugin = true; return { startedByPlugin: true } }
+      // A persisted PID alone cannot prove process identity after Host restart.
+      // Retain it for diagnostics, but never regain kill authority from it.
+      if (owner !== undefined && this.pidAlive(owner.pid)) this.managedPid = owner.pid
+      else if (owner !== undefined && this.ownerPath !== undefined) await rm(this.ownerPath, { force: true })
       return { startedByPlugin: false }
     } catch { /* start below */ }
     if (!this.config.comfy.autoStart) throw new FishDrawsError('ComfyUI is offline and auto-start is disabled', 'COMFY_OFFLINE', 'startup')
@@ -102,13 +111,7 @@ export class ComfyLifecycle {
       if (!this.childExited(child)) throw new FishDrawsError('plugin-owned ComfyUI did not exit after termination', 'COMFY_STOP_FAILED', 'lifecycle')
     }
     if (child === undefined && this.managedPid !== undefined && this.pidAlive(this.managedPid)) {
-      try { process.kill(this.managedPid, 'SIGTERM') } catch { /* already gone */ }
-      await this.waitPidExit(this.managedPid, 10_000)
-      if (this.pidAlive(this.managedPid)) {
-        try { process.kill(this.managedPid, 'SIGKILL') } catch { /* already gone */ }
-        await this.waitPidExit(this.managedPid, 5_000)
-      }
-      if (this.pidAlive(this.managedPid)) throw new FishDrawsError('plugin-owned ComfyUI did not exit after termination', 'COMFY_STOP_FAILED', 'lifecycle')
+      throw new FishDrawsError('ComfyUI has no live plugin process handle; stop it from its own console', 'COMFY_PROCESS_IDENTITY_UNPROVEN', 'lifecycle')
     }
     if (this.ownerPath !== undefined) await rm(this.ownerPath, { force: true })
     this.child = undefined; this.managedPid = undefined; this.startedByPlugin = false

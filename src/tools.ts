@@ -59,6 +59,10 @@ export function registerTools(ctx: Context, service: FishDrawsService): void {
         const data = await readFile(output.path)
         attachments.push(await ctx.attachments.saveImage({ data, mediaType: 'image/png', name: output.relative_path }))
       }
+      const diagnosticPath = await service.finalizeDiagnosticDelivery(args.task_id)
+      if (diagnosticPath !== undefined && result.outputs[0] !== undefined) {
+        result.outputs[0].path = diagnosticPath; result.outputs[0].relative_path = 'image.png'; result.images = [diagnosticPath]
+      }
       return { result, attachments }
     },
   } as any))

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -20,6 +20,7 @@ import { loadWorkflowTemplate } from './runtime/workflow-compiler.js'
 import { StrataVram } from './runtime/strata-vram.js'
 import { planPreflightReferences } from './runtime/preflight-references.js'
 import { normalizeExpandedPrompt } from './runtime/prompt-normalization.js'
+import { DiagnosticRunner } from './settings-remote/diagnostics-runner.js'
 
 export type ReferenceSelector =
   | { kind: 'attachment'; user_turn_offset: number; image_index: number }
@@ -48,6 +49,8 @@ export interface PreflightRecord {
   targetWidth: number; targetHeight: number; sampleWidth: number; sampleHeight: number; sizeSource: string
   outpaintingRequired: boolean; safetyProfile: string; oversizeConfirmationRequired: boolean
   visualFacts: string[]; uncertainties: string[]; complexConfirmationRequired: boolean; digest: string; createdAtUtc: string
+  /** Immutable runtime/model snapshot captured before any side effect. */
+  configSnapshot: ResolvedConfig
 }
 
 export interface GenerateInput {
@@ -62,20 +65,48 @@ declare module '@deepseek-ai/cordis' { interface Context { fishDraws: FishDrawsS
 declare module '@deepseek-ai/dsh-jobs/view' { interface JobKindMap { 'fish-draws': 'fish-draws' } }
 
 export class FishDrawsService extends Service {
-  readonly lifecycle: ComfyLifecycle
-  readonly executor: FishDrawsExecutor
+  lifecycle: ComfyLifecycle
+  executor: FishDrawsExecutor
+  private readonly configSource: () => ResolvedConfig
+  private activeConfig: ResolvedConfig
   private readonly preflights = new Map<string, PreflightRecord>()
   private readonly tasks = new Map<string, TaskIndex>()
   private readonly records = new Map<string, TaskRecord>()
-  constructor(ctx: Context, readonly config: ResolvedConfig, readonly runtimeRoot: string) {
+  readonly diagnosticsRunner: DiagnosticRunner
+  constructor(ctx: Context, config: ResolvedConfig | (() => ResolvedConfig), readonly runtimeRoot: string) {
     super(ctx, 'fishDraws')
-    this.lifecycle = new ComfyLifecycle(config)
-    this.executor = new FishDrawsExecutor(config, this.lifecycle, ctx.credentials, runtimeRoot)
+    this.configSource = typeof config === 'function' ? config : () => config
+    this.activeConfig = this.configSource()
+    this.lifecycle = new ComfyLifecycle(this.activeConfig)
+    this.executor = new FishDrawsExecutor(this.activeConfig, this.lifecycle, ctx.credentials, runtimeRoot)
+    this.diagnosticsRunner = new DiagnosticRunner(this.configSource)
+  }
+
+  get config(): ResolvedConfig { return this.configSource() }
+  get activeTaskId(): string | undefined { return this.executor.activeTaskId }
+  get strataReleased(): boolean { return this.executor.strataReleased }
+
+  async startComfyForTest(): Promise<{ startedByPlugin: boolean }> {
+    if (this.executor.activeTaskId !== undefined || this.diagnosticsRunner.active) throw new FishDrawsError('ComfyUI test start is blocked while work is active', 'COMFY_START_BLOCKED', 'preflight')
+    await this.activateConfig(this.configSource())
+    return this.lifecycle.ensureOnline(this.runtimeRoot)
   }
 
   async preflight(input: PreflightInput, agent: Agent, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    if (this.config.comfy.root === '' || this.config.storage.outputRoot === '') throw new FishDrawsError('configure comfy.root before using fish-draws', 'CONFIGURATION_REQUIRED', 'preflight')
-    if (this.config.strata.handoffEnabled && this.config.strata.vramEndpoint === undefined) throw new FishDrawsError('configure the loopback Strata VRAM endpoint or explicitly disable VRAM handoff', 'STRATA_CONFIGURATION_REQUIRED', 'preflight')
+    let configSnapshot = this.configSource()
+    const diagnostic = this.diagnosticsRunner.forSession(String(agent.id))
+    if (this.diagnosticsRunner.active && diagnostic === undefined) throw new FishDrawsError('an isolated fish-draws diagnostic owns the generation mutex', 'DIAGNOSTIC_BUSY', 'preflight')
+    if (diagnostic !== undefined && this.executor.activeTaskId !== undefined) throw new FishDrawsError('a formal fish-draws task owns the generation mutex', 'TASK_BUSY', 'preflight')
+    if (diagnostic !== undefined) {
+      if (input.mode !== 't2i' || input.references.length !== 0 || input.target_width !== 1024 || input.target_height !== 1024 || (input.acceleration ?? 'balanced') !== 'balanced' || (input.count ?? 1) !== 1) {
+        throw new FishDrawsError('diagnostic sessions may only run the fixed 1024x1024 balanced T2I contract', 'DIAGNOSTIC_CONTRACT_MISMATCH', 'preflight')
+      }
+      const profile = configSnapshot.modelProfiles.find(value => value.id === diagnostic.profileId)
+      if (profile === undefined) throw new FishDrawsError('diagnostic model profile is no longer available', 'DIAGNOSTIC_PROFILE_NOT_FOUND', 'preflight')
+      configSnapshot = { ...configSnapshot, currentModelProfileId: profile.id, currentModelProfile: profile, models: { ...profile.files }, safety: profile.safety }
+    }
+    if (configSnapshot.comfy.root === '' || configSnapshot.storage.outputRoot === '') throw new FishDrawsError('configure comfy.root before using fish-draws', 'CONFIGURATION_REQUIRED', 'preflight')
+    if (configSnapshot.strata.handoffEnabled && configSnapshot.strata.vramEndpoint === undefined) throw new FishDrawsError('configure the loopback Strata VRAM endpoint or explicitly disable VRAM handoff', 'STRATA_CONFIGURATION_REQUIRED', 'preflight')
     const taskId = input.task_id ?? this.newTaskId()
     this.validateTaskId(taskId)
     if (input.mode === 't2i' && input.references.length !== 0) throw new FishDrawsError('t2i does not accept reference images', 'UNEXPECTED_REFERENCE', 'preflight')
@@ -87,16 +118,22 @@ export class FishDrawsService extends Service {
     if (input.size_reference_index !== undefined) canvas.sizeSource = `reference-upload:${input.size_reference_index + 1}`
     const acceleration = input.acceleration ?? ((input.count ?? 1) > 1 ? 'fast' : 'balanced')
     const profileName = safetyProfileName(input.mode, normalized.length, acceleration, input.count ?? 1)
-    const profile = this.config.safety[profileName]
+    const profile = configSnapshot.safety[profileName]
     const base = {
       taskId, mode: input.mode, originalPrompt: input.original_prompt, references: normalized,
       targetWidth: canvas.targetWidth, targetHeight: canvas.targetHeight, sampleWidth: canvas.sampleWidth, sampleHeight: canvas.sampleHeight,
       sizeSource: canvas.sizeSource, outpaintingRequired: canvas.outpaintingRequired, safetyProfile: profileName,
       oversizeConfirmationRequired: !canvasWithinProfile(canvas, profile), visualFacts: input.visual_facts ?? [], uncertainties: input.uncertainties ?? [],
-      complexConfirmationRequired: input.complex_confirmation_required ?? false, createdAtUtc: new Date().toISOString(),
+      complexConfirmationRequired: input.complex_confirmation_required ?? false, createdAtUtc: new Date().toISOString(), configSnapshot,
     }
-    const { createdAtUtc: _createdAtUtc, ...contract } = base
-    const digest = createHash('sha256').update(JSON.stringify({ ...contract, references: base.references.map(({ path: _path, ...value }) => value) })).digest('hex')
+    const { createdAtUtc: _createdAtUtc, configSnapshot: _configSnapshot, ...contract } = base
+    const digest = createHash('sha256').update(JSON.stringify({
+      ...contract,
+      model_profile_id: configSnapshot.currentModelProfileId,
+      model_profile_hash: configSnapshot.currentModelProfile.profileHash,
+      workflow_version: configSnapshot.currentModelProfile.workflowCompatibility.workflowVersion,
+      references: base.references.map(({ path: _path, ...value }) => value),
+    })).digest('hex')
     const existing = this.tasks.get(taskId) ?? await this.findTask(taskId)
     if (existing !== undefined) {
       const manifest = await readManifest(join(existing.taskDirectory, 'result.json'))
@@ -105,6 +142,7 @@ export class FishDrawsService extends Service {
     const record: PreflightRecord = { ...base, digest }
     signal?.throwIfAborted()
     this.preflights.set(taskId, record)
+    if (diagnostic !== undefined) await this.diagnosticsRunner.update(diagnostic.runId, { status: 'running', taskId })
     return this.publicPreflight(record)
   }
 
@@ -113,7 +151,12 @@ export class FishDrawsService extends Service {
     if (preflight === undefined || preflight.digest !== input.preflight_digest) throw new FishDrawsError('preflight is missing or changed', 'PREFLIGHT_MISMATCH', 'preflight')
     if (preflight.complexConfirmationRequired && input.complex_task_confirmed !== true) throw new FishDrawsError('complex task facts and expanded prompt require confirmation', 'CONFIRMATION_REQUIRED', 'preflight')
     if (preflight.oversizeConfirmationRequired && input.allow_oversize !== true) throw new FishDrawsError('sampling canvas exceeds the approved profile and requires confirmation', 'OVERSIZE_CONFIRMATION_REQUIRED', 'preflight')
+    const diagnostic = this.diagnosticsRunner.forSession(String(agent.id))
+    if (diagnostic !== undefined && ((input.count ?? 1) !== 1 || (input.steps ?? 40) !== 20 || (input.acceleration ?? 'balanced') !== 'balanced' || (input.quality_cycle ?? 0) !== 0 || input.formal_batch === true || (input.no_improvement_rounds ?? 0) !== 0)) {
+      throw new FishDrawsError('diagnostic sessions may only generate one balanced 20-step image without quality rework', 'DIAGNOSTIC_CONTRACT_MISMATCH', 'preflight')
+    }
     const normalizedInput: GenerateInput = { ...input, expanded_prompt: normalizeExpandedPrompt(input.expanded_prompt) }
+    await this.activateConfig(preflight.configSnapshot)
     const executionId = randomUUID()
     const prior = this.records.get(input.task_id) ?? await this.previousRecord(input.task_id)
     const record = this.newTaskRecord(preflight, normalizedInput, executionId, prior)
@@ -136,21 +179,58 @@ export class FishDrawsService extends Service {
       },
     })
     this.preflights.delete(record.taskId)
+    if (diagnostic !== undefined) await this.diagnosticsRunner.update(diagnostic.runId, { jobId: String(jobId), executionId, expandedPrompt: normalizedInput.expanded_prompt })
     await rm(join(this.runtimeRoot, 'preflight', `${record.taskId}.json`), { force: true })
     this.tasks.set(record.taskId, { createdAtUtc: record.createdAtUtc, taskDirectory: this.executor.taskDirectory(record.taskId, record.createdAtUtc), executionId })
     return { jobId, taskId: record.taskId, executionId, status: 'queued' }
   }
 
   async result(taskId: string): Promise<ResultManifest> {
+    const archived = this.diagnosticsRunner.forTask(taskId)?.archivedManifest
+    if (archived !== undefined) return structuredClone(archived)
     const index = this.tasks.get(taskId) ?? await this.findTask(taskId)
     if (index === undefined) throw new FishDrawsError('task result was not found', 'TASK_NOT_FOUND', 'preflight')
     return readManifest(join(index.taskDirectory, 'result.json'))
   }
 
   async taskDirectory(taskId: string): Promise<string> {
+    const diagnostic = this.diagnosticsRunner.forTask(taskId)
+    if (diagnostic?.archivedManifest !== undefined) return join(this.config.storage.outputRoot, 'fish-draws', 'diagnostics', diagnostic.runId)
     const index = this.tasks.get(taskId) ?? await this.findTask(taskId)
     if (index === undefined) throw new FishDrawsError('task result was not found', 'TASK_NOT_FOUND', 'preflight')
     return index.taskDirectory
+  }
+
+  async finalizeDiagnosticDelivery(taskId: string): Promise<string | undefined> {
+    const diagnostic = this.diagnosticsRunner.forTask(taskId)
+    if (diagnostic === undefined) return undefined
+    if (diagnostic.archivedManifest !== undefined && diagnostic.imageRelativePath !== undefined) return join(this.config.storage.outputRoot, 'fish-draws', 'diagnostics', diagnostic.runId, diagnostic.imageRelativePath)
+    const index = this.tasks.get(taskId) ?? await this.findTask(taskId)
+    if (index === undefined) throw new FishDrawsError('diagnostic task result was not found', 'TASK_NOT_FOUND', 'technical')
+    const manifest = await readManifest(join(index.taskDirectory, 'result.json'))
+    if (manifest.status !== 'completed' && manifest.status !== 'completed_with_warnings') {
+      await this.diagnosticsRunner.settle(diagnostic.runId, { status: manifest.status === 'cancelled' ? 'cancelled' : 'failed', failureClass: manifest.failure?.class ?? 'technical', error: manifest.failure?.message ?? `diagnostic task ended as ${manifest.status}` })
+      return undefined
+    }
+    const output = manifest.outputs[0]
+    if (output === undefined || manifest.outputs.length !== 1) throw new FishDrawsError('diagnostic did not produce exactly one validated image', 'DIAGNOSTIC_OUTPUT_INVALID', 'technical')
+    const destinationRoot = join(this.config.storage.outputRoot, 'fish-draws', 'diagnostics', diagnostic.runId)
+    await mkdir(destinationRoot, { recursive: true })
+    const destination = join(destinationRoot, 'image.png')
+    await rm(destination, { force: true })
+    await rename(join(index.taskDirectory, output.relative_path), destination)
+    const archivedManifest: ResultManifest = structuredClone(manifest)
+    archivedManifest.outputs = [{ ...output, relative_path: 'image.png' }]
+    archivedManifest.candidates = []
+    await this.diagnosticsRunner.settle(diagnostic.runId, {
+      status: manifest.status === 'completed_with_warnings' ? 'warning' : 'completed', imageRelativePath: 'image.png', executionId: manifest.execution_id, expandedPrompt: manifest.prompts.expanded,
+      canvas: { targetWidth: manifest.canvas.target_width, targetHeight: manifest.canvas.target_height, sampleWidth: manifest.canvas.sample_width, sampleHeight: manifest.canvas.sample_height, actualWidth: output.width, actualHeight: output.height },
+      lifecycle: { comfyStartedByPlugin: manifest.lifecycle.comfy_started_by_plugin, comfyModelsUnloaded: manifest.lifecycle.comfy_models_unloaded, strataRestored: manifest.lifecycle.strata_restored, cleanupComplete: manifest.cleanup.complete },
+      archivedManifest,
+    })
+    await rm(index.taskDirectory, { recursive: true, force: true })
+    this.tasks.delete(taskId)
+    return destination
   }
 
   async finalize(taskId: string, decision: 'adopt' | 'continue' | 'abandon', selections: Array<{ execution_id: string; output_index: number }> = []): Promise<ResultManifest> {
@@ -198,14 +278,36 @@ export class FishDrawsService extends Service {
   async diagnose(): Promise<Record<string, unknown>> { await this.cleanupLegacyPreflights(); await this.retryCleanupJournal(); return diagnostics(this.config, this.lifecycle, this.runtimeRoot) }
   async recoverLifecycle(): Promise<void> {
     await this.cleanupLegacyPreflights()
+    await this.diagnosticsRunner.recover()
     if (!this.config.strata.handoffEnabled || this.config.strata.vramEndpoint === undefined) return
-    const strata = new StrataVram(this.config.strata.vramEndpoint, this.config.strata.credentialRef, this.ctx.credentials, join(this.runtimeRoot, 'strata-vram-journal.json'))
+    const strata = new StrataVram(this.config.strata.vramEndpoint, this.config.strata.credentialRef, this.ctx.credentials, join(this.runtimeRoot, 'strata-vram-journal.json'), this.config.strata.authMode)
     await strata.recover()
   }
   async dispose(): Promise<void> {
     this.preflights.clear()
     await this.cleanupLegacyPreflights()
-    await this.lifecycle.stopOwned()
+    await this.lifecycle.stopOwned().catch(error => { this.ctx.logger.warn(`fish-draws lifecycle disposal warning: ${error instanceof Error ? error.message : String(error)}`) })
+  }
+
+  private async activateConfig(next: ResolvedConfig): Promise<void> {
+    if (this.runtimeSignature(this.activeConfig) === this.runtimeSignature(next)) return
+    if (this.executor.activeTaskId !== undefined) throw new FishDrawsError('configuration changed while another task is active', 'CONFIG_CHANGE_PENDING', 'preflight')
+    if (this.lifecycle.hasLiveOwnedHandle) {
+      const queue = await this.lifecycle.client.queueState().catch(() => undefined)
+      if (queue === undefined || !queue.idle) throw new FishDrawsError('saved ComfyUI settings will apply after the current service becomes idle', 'CONFIG_CHANGE_PENDING', 'preflight')
+      await this.lifecycle.stopOwned()
+    }
+    this.activeConfig = next
+    this.lifecycle = new ComfyLifecycle(next)
+    this.executor = new FishDrawsExecutor(next, this.lifecycle, this.ctx.credentials, this.runtimeRoot)
+  }
+
+  private runtimeSignature(config: ResolvedConfig): string {
+    return JSON.stringify({
+      comfy: { ...config.comfy, apiUrl: config.comfy.apiUrl.href }, storage: config.storage,
+      model: config.currentModelProfile.profileHash,
+      strata: { ...config.strata, vramEndpoint: config.strata.vramEndpoint?.href }, runtime: config.runtime,
+    })
   }
 
   private async cleanupLegacyPreflights(): Promise<void> {
@@ -237,11 +339,22 @@ export class FishDrawsService extends Service {
 
   private async runJob(record: TaskRecord, preflight: PreflightRecord, input: GenerateInput, job: JobHandle, signal: AbortSignal) {
     try {
-      const profile = this.config.safety[preflight.safetyProfile as keyof ResolvedConfig['safety']]
-      const final = await this.executor.execute({ record, references: preflight.references, count: input.count ?? 1, seed: input.seed ?? -1, reserveMiB: profile.reserveMiB, retainAllCandidates: this.config.storage.retainAllSuccessfulCandidates, formalBatch: input.formal_batch ?? (input.count ?? 1) > 1, allowOversize: input.allow_oversize ?? false, pauseForSelection: (input.no_improvement_rounds ?? 0) >= 2 }, value => { job.updateProgress(value.detail === undefined ? value.phase : `${value.phase}: ${value.detail}`) }, signal)
+      const profile = preflight.configSnapshot.safety[preflight.safetyProfile as keyof ResolvedConfig['safety']]
+      const final = await this.executor.execute({ record, references: preflight.references, count: input.count ?? 1, seed: input.seed ?? -1, reserveMiB: profile.reserveMiB, retainAllCandidates: preflight.configSnapshot.storage.retainAllSuccessfulCandidates, formalBatch: input.formal_batch ?? (input.count ?? 1) > 1, allowOversize: input.allow_oversize ?? false, pauseForSelection: (input.no_improvement_rounds ?? 0) >= 2 }, value => {
+        job.updateProgress(value.detail === undefined ? value.phase : `${value.phase}: ${value.detail}`)
+        const diagnostic = this.diagnosticsRunner.forTask(record.taskId)
+        if (diagnostic !== undefined) this.diagnosticsRunner.stage(diagnostic.runId, value.phase, value.detail)
+      }, signal)
       this.records.set(record.taskId, final)
+      const diagnostic = this.diagnosticsRunner.forTask(record.taskId)
+      if (diagnostic !== undefined && final.status === 'cancelled') await this.diagnosticsRunner.settle(diagnostic.runId, { status: 'cancelled', failureClass: 'cancelled', error: final.failure?.message ?? 'diagnostic cancelled' })
+      else if (diagnostic !== undefined && final.status === 'failed') await this.diagnosticsRunner.settle(diagnostic.runId, { status: 'failed', failureClass: final.failure?.class ?? 'technical', error: final.failure?.message ?? 'diagnostic failed' })
       return final.status === 'failed' ? { status: 'failed' as const, ...(final.failure?.message === undefined ? {} : { detail: final.failure.message }) } : final.status === 'cancelled' ? { status: 'killed' as const } : { status: 'completed' as const, result: JSON.stringify({ task_id: final.taskId, execution_id: final.executionId, status: final.status }) }
-    } catch (error) { return { status: signal.aborted ? 'killed' as const : 'failed' as const, detail: error instanceof Error ? error.message : String(error) } }
+    } catch (error) {
+      const diagnostic = this.diagnosticsRunner.forTask(record.taskId)
+      if (diagnostic !== undefined) await this.diagnosticsRunner.settle(diagnostic.runId, { status: signal.aborted ? 'cancelled' : 'failed', failureClass: signal.aborted ? 'cancelled' : 'technical', error: error instanceof Error ? error.message : String(error) })
+      return { status: signal.aborted ? 'killed' as const : 'failed' as const, detail: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   private newTaskRecord(preflight: PreflightRecord, input: GenerateInput, executionId: string, previous?: TaskRecord): TaskRecord {
@@ -278,9 +391,9 @@ export class FishDrawsService extends Service {
   }
   private attachmentAt(agent: Agent, userTurnOffset: number, imageIndex: number): ImageAttachmentRef {
     if (!Number.isInteger(userTurnOffset) || userTurnOffset < 0 || !Number.isInteger(imageIndex) || imageIndex < 0) throw new FishDrawsError('attachment selector indices must be non-negative integers', 'INVALID_ATTACHMENT_SELECTOR', 'preflight')
-    const messages = agent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source.kind === 'user').reverse()
+    const messages = agent.session.snapshotEvents().filter((event: any) => event.type === 'user/message' && event.data.source.kind === 'user').reverse()
     const message = messages[userTurnOffset]
-    const images = message?.type === 'user/message' ? message.data.content.filter((block): block is { type: 'image'; attachment: ImageAttachmentRef } => block.type === 'image') : []
+    const images = message?.type === 'user/message' ? message.data.content.filter((block: any): block is { type: 'image'; attachment: ImageAttachmentRef } => block.type === 'image') : []
     const ref = images[imageIndex]?.attachment
     if (ref === undefined) throw new FishDrawsError('attachment selector did not match an image', 'ATTACHMENT_NOT_FOUND', 'preflight')
     return ref
