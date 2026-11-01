@@ -72,6 +72,7 @@ export class FishDrawsService extends Service {
   private readonly preflights = new Map<string, PreflightRecord>()
   private readonly tasks = new Map<string, TaskIndex>()
   private readonly records = new Map<string, TaskRecord>()
+  private activeExecution: { taskId: string; controller: AbortController; done?: Promise<unknown> } | undefined
   readonly diagnosticsRunner: DiagnosticRunner
   constructor(ctx: Context, config: ResolvedConfig | (() => ResolvedConfig), readonly runtimeRoot: string) {
     super(ctx, 'fishDraws')
@@ -162,11 +163,15 @@ export class FishDrawsService extends Service {
     const record = this.newTaskRecord(preflight, normalizedInput, executionId, prior)
     const owner = agent.id
     const controller = new AbortController()
-    const jobId = this.ctx.jobs.start({
+    const activeExecution = { taskId: record.taskId, controller } as { taskId: string; controller: AbortController; done?: Promise<unknown> }
+    this.activeExecution = activeExecution
+    let jobId: JobId
+    try { jobId = this.ctx.jobs.start({
       kind: 'fish-draws', label: `${preflight.mode} ${preflight.targetWidth}x${preflight.targetHeight}`, owner,
       ...(toolCall === undefined ? {} : { toolCall: { callId: toolCall.callId as any, rootCallId: toolCall.rootCallId as any } }),
       run: (job: JobHandle) => {
-        const done = this.runJob(record, preflight, normalizedInput, job, controller.signal)
+        const done = this.runJob(record, preflight, normalizedInput, job, controller.signal).finally(() => { if (this.activeExecution === activeExecution) this.activeExecution = undefined })
+        activeExecution.done = done
         return {
           cancel: reason => {
             const cancellation = new FishDrawsError(reason ?? 'cancelled', 'CANCELLED', 'cancelled')
@@ -177,7 +182,7 @@ export class FishDrawsService extends Service {
           done,
         }
       },
-    })
+    }) } catch (error) { if (this.activeExecution === activeExecution) this.activeExecution = undefined; throw error }
     this.preflights.delete(record.taskId)
     if (diagnostic !== undefined) await this.diagnosticsRunner.update(diagnostic.runId, { jobId: String(jobId), executionId, expandedPrompt: normalizedInput.expanded_prompt })
     await rm(join(this.runtimeRoot, 'preflight', `${record.taskId}.json`), { force: true })
@@ -286,6 +291,16 @@ export class FishDrawsService extends Service {
   async dispose(): Promise<void> {
     this.preflights.clear()
     await this.cleanupLegacyPreflights()
+    const execution = this.activeExecution
+    if (execution !== undefined) {
+      if (!execution.controller.signal.aborted) execution.controller.abort(new FishDrawsError('fish-draws Host is disposing', 'CANCELLED', 'cancelled'))
+      this.executor.cancel(execution.taskId, 'fish-draws Host is disposing')
+      await execution.done?.catch(error => { this.ctx.logger.warn(`fish-draws task disposal warning: ${error instanceof Error ? error.message : String(error)}`) })
+    }
+    const diagnostic = this.diagnosticsRunner.activeRun
+    if (diagnostic !== undefined && this.diagnosticsRunner.active) {
+      await this.diagnosticsRunner.settle(diagnostic.runId, { status: 'cancelled', failureClass: 'cancelled', error: 'fish-draws Host was disabled or reloaded' }).catch(error => { this.ctx.logger.warn(`fish-draws diagnostic disposal warning: ${error instanceof Error ? error.message : String(error)}`) })
+    }
     await this.lifecycle.stopOwned().catch(error => { this.ctx.logger.warn(`fish-draws lifecycle disposal warning: ${error instanceof Error ? error.message : String(error)}`) })
   }
 
