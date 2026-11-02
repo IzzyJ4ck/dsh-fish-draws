@@ -16,15 +16,17 @@ export async function apply(ctx: Context): Promise<void> {
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE)
   ctx.effect(() => disposeRemote)
   ctx.effect(() => () => disposeClientStreams())
-  ctx.effect(() => (ctx.locale.register as any)('fish-draws.settings', dictionaries))
-  const form = ctx.configForms.get<ConfigValues>('fish-draws')
-  ctx.effect(() => ctx.configForms.whileServed(['fish-draws'], () =>
-    ctx.slots.inject('settings.section', () =>
-      ctx.slots.register(
-        { name: 'settings.section', id: 'fish-draws', order: 450, label: ctx.locale.getSnapshot().active.toLowerCase().startsWith('zh') ? '画图设置' : 'Image Generation' },
-        ({ close }: { close: () => void }) => <FishDrawsSettings ctx={ctx} form={form} close={close} /> as any,
+  ctx.inject(['remote.fishDrawsSettings', 'remote.credentials', 'remote.session'], (remoteCtx) => {
+    remoteCtx.effect(() => (remoteCtx.locale.register as any)('fish-draws.settings', dictionaries))
+    const form = remoteCtx.configForms.get<ConfigValues>('fish-draws')
+    remoteCtx.effect(() => remoteCtx.configForms.whileServed(['fish-draws'], () =>
+      remoteCtx.slots.inject('settings.section', () =>
+        remoteCtx.slots.register(
+          { name: 'settings.section', id: 'fish-draws', order: 450, label: remoteCtx.locale.getSnapshot().active.toLowerCase().startsWith('zh') ? '画图设置' : 'Image Generation' },
+          ({ close }: { close: () => void }) => <FishDrawsSettings ctx={remoteCtx} form={form} close={close} /> as any,
+        ),
       ),
-    ),
-  ))
+    ))
+  })
 }
 

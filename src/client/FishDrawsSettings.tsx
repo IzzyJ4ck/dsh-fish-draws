@@ -112,9 +112,11 @@ function StrataPanel({ ctx, draft, update, setMessage }: PanelProps) {
   async function inspectCredential(): Promise<void> {
     const ref = strata.credentialRef?.trim() ?? ''
     if (ref === '') { setCredentialStatus('No credential reference configured.'); return }
-    const result = await ctx.remote.credentials.describe([ref])
-    if (!result.ok) { setCredentialStatus(result.error.message); return }
-    const info = result.value[ref]; setCredentialStatus(info === undefined ? 'Unavailable' : `configured=${info.configured}; source=${info.source ?? 'none'}; writable=${info.writable}`)
+    try {
+      const result = await ctx.remote.credentials.describe([ref])
+      if (!result.ok) { setCredentialStatus(`Credential status check failed: ${result.error.message}`); return }
+      const info = result.value[ref]; setCredentialStatus(info === undefined ? 'Unavailable' : `configured=${info.configured}; source=${info.source ?? 'none'}; writable=${info.writable}`)
+    } catch (error) { setCredentialStatus(`Credential status check failed: ${errorMessage(error)}`) }
   }
   return <section className={styles.panel} id="fd-strata-panel"><div className={styles.grid}><Field label={t('VRAM handoff', '显存交接')}><Switch checked={strata.handoffEnabled ?? true} onChange={value => set({ handoffEnabled: value })} label={t('Enable Strata VRAM handoff', '启用 Strata 显存交接')} /></Field><Field label={t('Authentication', '认证方式')}><select value={strata.authMode ?? 'bearer'} onChange={event => set({ authMode: event.target.value as 'none' | 'bearer' })}><option value="none">{t('None (loopback only)', '无（仅限本机回环）')}</option><option value="bearer">Bearer credential</option></select></Field><Field label={t('Strata endpoint', 'Strata 接口')} wide><Input value={strata.vramEndpoint ?? ''} onChange={event => set({ vramEndpoint: event.target.value })} /></Field><Field label={t('Credential reference', '凭据引用')} wide><Input value={strata.credentialRef ?? ''} onChange={event => set({ credentialRef: event.target.value })} /></Field></div><div className={styles.status}>{credentialStatus}</div><div className={styles.actions}><Button onClick={() => void call(ctx.remote.fishDrawsSettings.probeStrata(), setMessage)}>{t('Test Strata', '测试 Strata')}</Button><Button onClick={() => void inspectCredential()}>{t('Check credential status', '检查凭据状态')}</Button><Button onClick={() => void setCredential(ctx, strata.credentialRef ?? '', setMessage)}>{t('Set credential', '设置凭据')}</Button><Button variant="outline" onClick={() => void unsetCredential(ctx, strata.credentialRef ?? '', setMessage)}>{t('Delete credential', '删除凭据')}</Button></div><p>{t('Secrets are written one-way through DSH credentials and are never displayed. The deprecated prompt-expansion endpoint is intentionally hidden.', '密钥仅单向写入 DSH credentials，永不回显。已废弃的提示词扩写接口已隐藏。')}</p></section>
 }
@@ -146,15 +148,17 @@ function DiagnosticsPanel({ ctx, form, draft, update, overview, setMessage }: { 
   }, [ctx, form, overview?.activeDiagnosticRunId, overview?.lastDiagnosticRunId, setMessage])
   const setRoutes = (next: DiagnosticModelRouteConfig[]) => update({ ...draft, diagnostics: { ...(draft.diagnostics ?? {}), localModelRoutes: next } })
   async function loadCatalog(): Promise<void> {
-    const result = await ctx.remote.session.modelCatalog()
-    if (!result.ok) { setMessage(result.error.message); return }
-    const values = result.value.groups.flatMap(group => group.models.flatMap(model => {
-      const efforts = model.reasoning?.efforts ?? []
-      return efforts.length === 0 ? [{ provider: group.id, model: model.id, name: `${group.name} / ${model.name}` }] : efforts.map(effort => ({ provider: group.id, model: model.id, name: `${group.name} / ${model.name} / ${effort.name}`, reasoningEffort: effort.id }))
-    }))
-    setCatalogRoutes(values); if (values[0] !== undefined) setCatalogChoice(routeKey(values[0]))
-    const available = new Set(values.map(routeKey)); setRoutes(routes.map(route => available.has(routeKey(route)) ? (route.status === 'unavailable' ? { ...route, status: 'unverified' } : route) : { ...route, status: 'unavailable' }))
-    setMessage(`Loaded ${values.length} routable model route(s). Catalog metadata does not prove that a route is local.`)
+    try {
+      const result = await ctx.remote.session.modelCatalog()
+      if (!result.ok) { setMessage(`Model catalog refresh failed: ${result.error.message}`); return }
+      const values = result.value.groups.flatMap(group => group.models.flatMap(model => {
+        const efforts = model.reasoning?.efforts ?? []
+        return efforts.length === 0 ? [{ provider: group.id, model: model.id, name: `${group.name} / ${model.name}` }] : efforts.map(effort => ({ provider: group.id, model: model.id, name: `${group.name} / ${model.name} / ${effort.name}`, reasoningEffort: effort.id }))
+      }))
+      setCatalogRoutes(values); setCatalogChoice(values[0] === undefined ? '' : routeKey(values[0]))
+      const available = new Set(values.map(routeKey)); setRoutes(routes.map(route => available.has(routeKey(route)) ? (route.status === 'unavailable' ? { ...route, status: 'unverified' } : route) : { ...route, status: 'unavailable' }))
+      setMessage(`Loaded ${values.length} routable model route(s). Catalog metadata does not prove that a route is local.`)
+    } catch (error) { setMessage(`Model catalog refresh failed: ${errorMessage(error)}`) }
   }
   function addLocalRoute(): void {
     const selected = catalogRoutes.find(value => routeKey(value) === catalogChoice)
@@ -199,8 +203,9 @@ function localized(ctx: Context): (english: string, chinese: string) => string {
 function Field({ label, wide = false, children }: { label: string; wide?: boolean; children: React.ReactNode }) { return <label className={`${styles.field} ${wide ? styles.fieldWide : ''}`}><span>{label}</span>{children}</label> }
 async function call(promise: Promise<{ ok: boolean; value?: unknown; error?: { message: string } }>, setMessage: (value: string) => void): Promise<void> { try { const result = await promise; setMessage(result.ok ? JSON.stringify(result.value, null, 2) : result.error?.message ?? 'Operation failed.') } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } }
 async function prepareStop(ctx: Context, setMessage: (value: string) => void): Promise<void> { const prepared = await ctx.remote.fishDrawsSettings.prepareComfyStop(); if (!prepared.ok) { setMessage(prepared.error.message); return } if (!prepared.value.allowed || prepared.value.nonce === undefined) { setMessage(prepared.value.blockers.join('\n')); return } if (!window.confirm('Stop this plugin-owned ComfyUI instance? Models will be unloaded first.')) return; await call(ctx.remote.fishDrawsSettings.stopComfy({ nonce: prepared.value.nonce }), setMessage) }
-async function setCredential(ctx: Context, ref: string, setMessage: (value: string) => void): Promise<void> { if (ref.trim() === '') { setMessage('Enter a credential reference first.'); return } const secret = window.prompt('Enter the Strata bearer secret. It will not be shown again.'); if (secret === null || secret === '') return; const result = await ctx.remote.credentials.set(ref, secret); setMessage(result.ok ? 'Credential stored.' : result.error.message) }
-async function unsetCredential(ctx: Context, ref: string, setMessage: (value: string) => void): Promise<void> { if (ref.trim() === '' || !window.confirm(`Delete credential ${ref}?`)) return; const result = await ctx.remote.credentials.unset(ref); setMessage(result.ok ? 'Credential deleted.' : result.error.message) }
+async function setCredential(ctx: Context, ref: string, setMessage: (value: string) => void): Promise<void> { if (ref.trim() === '') { setMessage('Enter a credential reference first.'); return } const secret = window.prompt('Enter the Strata bearer secret. It will not be shown again.'); if (secret === null || secret === '') return; try { const result = await ctx.remote.credentials.set(ref, secret); setMessage(result.ok ? 'Credential stored.' : `Credential update failed: ${result.error.message}`) } catch (error) { setMessage(`Credential update failed: ${errorMessage(error)}`) } }
+async function unsetCredential(ctx: Context, ref: string, setMessage: (value: string) => void): Promise<void> { if (ref.trim() === '' || !window.confirm(`Delete credential ${ref}?`)) return; try { const result = await ctx.remote.credentials.unset(ref); setMessage(result.ok ? 'Credential deleted.' : `Credential deletion failed: ${result.error.message}`) } catch (error) { setMessage(`Credential deletion failed: ${errorMessage(error)}`) } }
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function conservativeProfile(): ModelProfileConfig { const safety = () => ({ maxSampleWidth: 2048, maxSampleHeight: 2048, maxSamplePixels: 2400000, reserveMiB: 21504, approvalSource: 'bundled' as const }); return { schemaVersion: 1, id: 'new', name: 'New model profile', files: { unetName: '', clipName: '', vaeName: '' }, workflowCompatibility: { workflowVersion: 'qwen-image-2.1-unified-v3' }, safety: { t2iBalanced: safety(), editSingleBalanced: safety(), editMultiBalanced: safety(), fastBatch: safety() } } }
 function withoutProfileValidation(profile: ModelProfileConfig, patch: Partial<Omit<ModelProfileConfig, 'validation'>>): ModelProfileConfig { const { validation: _validation, ...base } = profile; return { ...base, ...patch } }
 

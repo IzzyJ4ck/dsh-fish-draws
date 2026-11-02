@@ -16,10 +16,24 @@ if (clientBundle.includes('react.production.min') || clientBundle.includes('Reac
 if (!clientBundle.includes('.$mount(') || !clientBundle.includes('@izzyj4ck/dsh-fish-draws')) throw new Error('client bundle does not mount its generated fish-draws Remote contribution')
 const clientInject = clientBundle.match(/const inject = \[([\s\S]*?)\];/u)?.[1] ?? ''
 if (clientInject.includes('remote.fishDrawsSettings')) throw new Error('client bundle deadlocks by injecting its own Remote namespace before mounting it')
+const remoteMountIndex = clientBundle.indexOf('.$mount(')
+const scopedInjectIndex = clientBundle.indexOf('"remote.fishDrawsSettings"', remoteMountIndex)
+const scopedInject = scopedInjectIndex < 0 ? '' : clientBundle.slice(scopedInjectIndex, scopedInjectIndex + 240)
+if (scopedInjectIndex < remoteMountIndex || !scopedInject.includes('"remote.credentials"') || !scopedInject.includes('"remote.session"')) throw new Error('client bundle must mount fish-draws Remote before creating its complete dependent child scope')
 const hostTypert = await import(new URL('lib/typert.host.js', root))
 const remoteTypert = await import(new URL('lib/typert.remote-client.js', root))
 if (!Array.isArray(hostTypert.TYPERT?.invocations) || hostTypert.TYPERT.invocations.length !== 14) throw new Error('Host Typert settings surface is incomplete')
 if (remoteTypert.TYPERT_REMOTE?.descriptors?.length !== 14) throw new Error('Client Typert settings surface is incomplete')
+const services = hostTypert.TYPERT?.model?.services
+if (!Array.isArray(services) || services.length !== 1) throw new Error('Host Typert service model is incomplete')
+const settingsService = services[0]
+if (settingsService.key !== 'fishDrawsSettings' || settingsService.exportName !== 'FishDrawsSettingsController') throw new Error('Host Typert service identity is invalid')
+for (const field of ['description', 'summary', 'jsDoc']) if (typeof settingsService[field] !== 'string' || settingsService[field].length === 0) throw new Error(`Host Typert service ${field} is missing`)
+if (!Array.isArray(settingsService.tags) || !Array.isArray(settingsService.members) || !Array.isArray(settingsService.types)) throw new Error('Host Typert service arrays are incomplete')
+if (settingsService.members.length !== 14) throw new Error('Host Typert service member documentation is incomplete')
+for (const member of settingsService.members) {
+  if (member.kind !== 'method' || typeof member.name !== 'string' || typeof member.signature !== 'string' || typeof member.summary !== 'string' || typeof member.jsDoc !== 'string') throw new Error(`Host Typert member documentation is invalid: ${String(member?.name)}`)
+}
 const forbiddenNames = new Set(['.env', '.npmrc'])
 const secretPattern = /(?:npm_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,}|(?:api[_-]?key|token|secret)\s*[:=]\s*["'][^"']{8,}["'])/giu
 async function walk(directory) {

@@ -29,7 +29,8 @@ function fixture(locale = 'en-US') {
     locale: { getSnapshot: () => ({ active: locale }) },
     remote: {
       fishDrawsSettings: { overview: () => ok({ pluginVersion: '3.1.0', comfyOnline: false, comfyOwnership: 'offline', diagnosticActive: false, strataReleased: false, currentModelProfileId: profile.id, currentModelProfileName: profile.name, currentModelProfileHash: 'x', deprecatedPromptEndpointConfigured: false }) },
-      credentials: { describe: () => ok({}), set: () => ok(undefined), unset: () => ok(undefined) }, session: {},
+      credentials: { describe: () => ok({ FISH_DRAWS_STRATA_API_KEY: { configured: true, source: 'user-env', writable: true } }), set: () => ok(undefined), unset: () => ok(undefined) },
+      session: { modelCatalog: () => ok({ default: { provider: 'qwn', model: 'qwen3.8-flash-next-iq3_s', reasoningEffort: 'high' }, routableProviders: ['qwn'], groups: [{ id: 'qwn', name: 'Qwen Strata Local', models: [{ id: 'qwen3.8-flash-next-iq3_s', name: 'Qwen3.8 Flash-Next', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }], failures: [] }) },
     },
   }
   return { form, ctx, listener }
@@ -64,6 +65,40 @@ describe('fish-draws settings client', () => {
     expect(await screen.findByText('设为当前')).toBeTruthy()
   })
 
+  it('reads credential status through the standard credentials Remote', async () => {
+    const { form, ctx } = fixture()
+    render(<FishDrawsSettings ctx={ctx as any} form={form as any} close={() => undefined} />)
+    fireEvent.click(screen.getByText('DSH & Strata'))
+    fireEvent.click(await screen.findByText('Check credential status'))
+    expect(await screen.findByText('configured=true; source=user-env; writable=true')).toBeTruthy()
+  })
+
+  it('shows standard Remote failures instead of leaving settings actions silent', async () => {
+    const { form, ctx } = fixture()
+    ctx.remote.credentials.describe = async () => { throw new Error('credential transport unavailable') }
+    ctx.remote.session.modelCatalog = async () => { throw new Error('catalog transport unavailable') }
+    render(<FishDrawsSettings ctx={ctx as any} form={form as any} close={() => undefined} />)
+    fireEvent.click(screen.getByText('DSH & Strata'))
+    fireEvent.click(await screen.findByText('Check credential status'))
+    expect(await screen.findByText('Credential status check failed: credential transport unavailable')).toBeTruthy()
+    fireEvent.click(screen.getByText('Diagnostics'))
+    fireEvent.click(await screen.findByText('Refresh model catalog'))
+    expect(await screen.findByText('Model catalog refresh failed: catalog transport unavailable')).toBeTruthy()
+  })
+
+  it('loads a routable DSH model and adds the confirmed local route to the diagnostics draft', async () => {
+    const { form, ctx } = fixture()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<FishDrawsSettings ctx={ctx as any} form={form as any} close={() => undefined} />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    fireEvent.click(await screen.findByText('Refresh model catalog'))
+    expect(await screen.findByText('Qwen Strata Local / Qwen3.8 Flash-Next / High')).toBeTruthy()
+    fireEvent.click(screen.getByText('Confirm selected route is local'))
+    expect(await screen.findByText('qwn / qwen3.8-flash-next-iq3_s / high')).toBeTruthy()
+    fireEvent.click(screen.getByText('Save'))
+    expect(form.mutate).toHaveBeenCalledOnce()
+  })
+
   it('mounts its generated Remote contribution before registering the settings section', async () => {
     const { form } = fixture()
     const disposers: Array<() => void | Promise<void>> = []
@@ -77,6 +112,10 @@ describe('fish-draws settings client', () => {
     const ctx: any = {
       remote: { $mount: mount },
       effect: (factory: () => void | (() => void | Promise<void>)) => { const dispose = factory(); if (typeof dispose === 'function') disposers.push(dispose) },
+      inject: vi.fn((services: string[], callback: (child: any) => unknown) => {
+        expect(services).toEqual(['remote.fishDrawsSettings', 'remote.credentials', 'remote.session'])
+        return callback(ctx)
+      }),
       locale: { register: () => vi.fn(), getSnapshot: () => ({ active: 'en-US' }) },
       configForms: { get: () => form, whileServed: (_names: string[], callback: () => unknown) => callback() },
       slots: { inject: (_name: string, callback: () => unknown) => callback(), register },
@@ -84,6 +123,8 @@ describe('fish-draws settings client', () => {
     expect(clientInject).not.toContain('remote.fishDrawsSettings')
     await applyClient(ctx)
     expect(mount).toHaveBeenCalledOnce()
+    expect(ctx.inject).toHaveBeenCalledOnce()
+    expect(mount.mock.invocationCallOrder[0]).toBeLessThan(ctx.inject.mock.invocationCallOrder[0])
     expect(register).toHaveBeenCalledOnce()
     for (const dispose of disposers.reverse()) await dispose()
     expect(remoteDispose).toHaveBeenCalledOnce()

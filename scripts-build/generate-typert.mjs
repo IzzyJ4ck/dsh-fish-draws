@@ -5,8 +5,40 @@ const root = resolve(new URL('..', import.meta.url).pathname.slice(process.platf
 const out = resolve(root, 'lib')
 await mkdir(out, { recursive: true })
 
+const serviceMembers = [
+  ['overview', 'overview(): Promise<SettingsOverview>', 'Read the sanitized fish-draws settings overview.'],
+  ['probeComfy', 'probeComfy(): Promise<ComfyProbeResult>', 'Probe the saved ComfyUI configuration without loading a model.'],
+  ['startComfyForTest', 'startComfyForTest(): Promise<OperationResult>', 'Start or reuse ComfyUI for an explicit settings test.'],
+  ['prepareComfyStop', 'prepareComfyStop(): Promise<ComfyStopPreparation>', 'Prepare a short-lived confirmation for safely stopping plugin-owned ComfyUI.'],
+  ['stopComfy', 'stopComfy(request: { nonce: string }): Promise<OperationResult>', 'Stop the same plugin-owned ComfyUI instance after revalidating the confirmation.'],
+  ['discoverModelCandidates', 'discoverModelCandidates(): Promise<ModelCandidates>', 'Read fixed loader candidates from the configured ComfyUI instance.'],
+  ['probeModelProfile', 'probeModelProfile(request: { profileId: string }): Promise<ModelProfileProbe>', 'Validate one saved model profile against fixed workflow requirements.'],
+  ['probeStrata', 'probeStrata(): Promise<StrataProbeResult>', 'Probe the configured loopback Strata VRAM endpoint.'],
+  ['readStrataStatus', 'readStrataStatus(): Promise<StrataProbeResult>', 'Read the current sanitized Strata integration status.'],
+  ['diagnose', 'diagnose(): Promise<Record<string, unknown>>', 'Collect a sanitized fish-draws configuration and lifecycle report.'],
+  ['diagnosticPrepare', 'diagnosticPrepare(request: DiagnosticPrepareRequest): Promise<DiagnosticRunView>', 'Prepare an isolated fixed T2I diagnostic run.'],
+  ['diagnosticStatus', 'diagnosticStatus(request: { runId: string }): Promise<DiagnosticRunView>', 'Read one registered diagnostic run.'],
+  ['diagnosticCancel', 'diagnosticCancel(request: { runId: string }): Promise<DiagnosticRunView>', 'Cancel one registered diagnostic run and converge its resources.'],
+  ['diagnosticDelete', 'diagnosticDelete(request: { runId: string }): Promise<OperationResult>', 'Delete one completed registered diagnostic run.'],
+].map(([name, signature, summary]) => ({ kind: 'method', name, signature, summary, jsDoc: `/** ${summary} */` }))
+
+const runtimeModel = {
+  services: [{
+    description: 'Host service backing the generated fishDrawsSettings Remote namespace.',
+    summary: 'Host service backing the generated fishDrawsSettings Remote namespace.',
+    tags: [],
+    jsDoc: '/** Host service backing the generated fishDrawsSettings Remote namespace. */',
+    key: 'fishDrawsSettings',
+    exportName: 'FishDrawsSettingsController',
+    members: serviceMembers,
+    types: [],
+  }],
+  events: [],
+  objects: [],
+}
+
 await writeFile(resolve(out, 'typert.host.js'), `import { TYPERT_REMOTE } from './settings-remote/remote-info.js'
-export const TYPERT = { package: '@izzyj4ck/dsh-fish-draws', face: 'host', schemas: [], get invocations() { return TYPERT_REMOTE.descriptors }, model: { services: [{ key: 'fishDrawsSettings', export: { subpath: '.', name: 'FishDrawsSettingsController' } }], events: [], objects: [] } }
+export const TYPERT = { package: '@izzyj4ck/dsh-fish-draws', face: 'host', schemas: [], get invocations() { return TYPERT_REMOTE.descriptors }, model: ${JSON.stringify(runtimeModel, null, 2)} }
 `, 'utf8')
 await writeFile(resolve(out, 'typert.host.d.ts'), `export declare const TYPERT: unknown
 `, 'utf8')
