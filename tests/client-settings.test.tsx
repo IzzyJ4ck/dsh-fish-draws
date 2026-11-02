@@ -28,7 +28,7 @@ function fixture(locale = 'en-US') {
   const ctx = {
     locale: { getSnapshot: () => ({ active: locale }) },
     remote: {
-      fishDrawsSettings: { overview: () => ok({ pluginVersion: '3.1.0', comfyOnline: false, comfyOwnership: 'offline', diagnosticActive: false, strataReleased: false, currentModelProfileId: profile.id, currentModelProfileName: profile.name, currentModelProfileHash: 'x', deprecatedPromptEndpointConfigured: false }) },
+      fishDrawsSettings: { overview: () => ok({ pluginVersion: '3.1.1', comfyOnline: false, comfyOwnership: 'offline', diagnosticActive: false, strataReleased: false, currentModelProfileId: profile.id, currentModelProfileName: profile.name, currentModelProfileHash: 'x', deprecatedPromptEndpointConfigured: false }) },
       credentials: { describe: () => ok({ FISH_DRAWS_STRATA_API_KEY: { configured: true, source: 'user-env', writable: true } }), set: () => ok(undefined), unset: () => ok(undefined) },
       session: { modelCatalog: () => ok({ default: { provider: 'qwn', model: 'qwen3.8-flash-next-iq3_s', reasoningEffort: 'high' }, routableProviders: ['qwn'], groups: [{ id: 'qwn', name: 'Qwen Strata Local', models: [{ id: 'qwen3.8-flash-next-iq3_s', name: 'Qwen3.8 Flash-Next', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }], failures: [] }) },
     },

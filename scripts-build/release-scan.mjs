@@ -4,7 +4,7 @@ const root = new URL('../', import.meta.url)
 const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
 if (packageJson.private === true) throw new Error('release package must not be private')
 if (packageJson.name !== '@izzyj4ck/dsh-fish-draws') throw new Error('unexpected package name')
-if (packageJson.version !== '3.1.0') throw new Error('unexpected release version')
+if (packageJson.version !== '3.1.1') throw new Error('unexpected release version')
 if (packageJson.scripts?.prepare !== undefined || packageJson.scripts?.preinstall !== undefined || packageJson.scripts?.install !== undefined || packageJson.scripts?.postinstall !== undefined) throw new Error('release package must not run install-time build scripts')
 const licensing = JSON.parse(await readFile(new URL('assets/licensing/redistribution-status.json', root), 'utf8'))
 for (const required of ['lib/index.js', 'lib/client.js', 'lib/client.js.map', 'lib/types/client/index.d.ts', 'lib/typert.host.js', 'lib/typert.remote-client.js', 'lib/assets/skill/SKILL.md', 'lib/assets/references/system-prompt-t2i.md', 'lib/assets/references/system-prompt-edit.md', 'lib/assets/workflows/qwen21-unified-api.json', 'lib/assets/licensing/AUTHORIZATION.md', 'lib/assets/licensing/redistribution-status.json', 'cordis.patch.yml', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'icon.svg']) {

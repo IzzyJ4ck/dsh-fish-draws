@@ -67,7 +67,7 @@ Never send passwords, OTPs, recovery codes or tokens to an Agent. Never commit `
    git log -1 --oneline
    ```
 
-   Require a clean reviewed release commit, version `3.0.0`, and repository `https://github.com/IzzyJ4ck/dsh-fish-draws`.
+   Require a clean reviewed release commit, version `3.1.1`, and repository `https://github.com/IzzyJ4ck/dsh-fish-draws`.
 
 ## C. Tests, build and release gate
 
@@ -88,8 +88,8 @@ Run in this order:
 npm pack --dry-run --json
 npm publish --dry-run --access public --registry=https://registry.npmjs.org/
 npm pack --json
-tar -tf .\izzyj4ck-dsh-fish-draws-3.0.0.tgz
-Get-FileHash .\izzyj4ck-dsh-fish-draws-3.0.0.tgz -Algorithm SHA256
+tar -tf .\izzyj4ck-dsh-fish-draws-3.1.1.tgz
+Get-FileHash .\izzyj4ck-dsh-fish-draws-3.1.1.tgz -Algorithm SHA256
 ```
 
 The archive must contain the prebuilt Host JS, declarations, `cordis.patch.yml`, manifest, READMEs, MIT license, third-party notices, locale, icon, bundled skill, prompt references, fixed workflow, safety config and licensing record.
@@ -121,9 +121,9 @@ The owner completes interactive 2FA. Do not add `--provenance`; an Agent must no
 ## G. Verify the registry release
 
 ```powershell
-npm view @izzyj4ck/dsh-fish-draws@3.0.0 --registry=https://registry.npmjs.org/
-npm view @izzyj4ck/dsh-fish-draws@3.0.0 dist.tarball --registry=https://registry.npmjs.org/
-dsh plugin --profile <fresh-profile> add "@izzyj4ck/dsh-fish-draws@3.0.0"
+npm view @izzyj4ck/dsh-fish-draws@3.1.1 --registry=https://registry.npmjs.org/
+npm view @izzyj4ck/dsh-fish-draws@3.1.1 dist.tarball --registry=https://registry.npmjs.org/
+dsh plugin --profile <fresh-profile> add "@izzyj4ck/dsh-fish-draws@3.1.1"
 ```
 
 Repeat fresh-profile tool, skill, localization/icon, cross-workspace generation, output, disable and uninstall checks. Record package/version, npm and tarball URLs, Git commit/tag, local tgz SHA-256, publish time and verification result—never credentials.
@@ -132,12 +132,12 @@ Only after these checks and explicit owner confirmation should a DSH plugin-mark
 
 ## Failure and rollback
 
-If publish reports failure, first query `npm view @izzyj4ck/dsh-fish-draws@3.0.0`. If absent, fix permission/2FA/manifest/network issues and reuse the unchanged verified tgz. If present, do not publish that name/version again.
+If publish reports failure, first query `npm view @izzyj4ck/dsh-fish-draws@3.1.1`. If absent, fix permission/2FA/manifest/network issues and reuse the unchanged verified tgz. If present, do not publish that name/version again.
 
 For a defective published version, prefer:
 
 ```powershell
-npm deprecate "@izzyj4ck/dsh-fish-draws@3.0.0" "<problem description>"
+npm deprecate "@izzyj4ck/dsh-fish-draws@3.1.1" "<problem description>"
 ```
 
 Fix, bump the patch version (for example `3.0.1`), and repeat every test/pack/install/publish step. Consider unpublish only when npm policy explicitly permits it and withdrawal is necessary. A used `name@version` is never reusable, even after withdrawal.

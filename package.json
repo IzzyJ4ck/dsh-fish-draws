@@ -1,6 +1,6 @@
 {
   "name": "@izzyj4ck/dsh-fish-draws",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "A DSH bundle for controlled local Qwen Image 2.1 generation and editing through ComfyUI.",
   "keywords": [
     "deepseek-harness",
@@ -52,7 +52,9 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "README.zh-CN.md",
+    "docs/images",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "icon.svg",

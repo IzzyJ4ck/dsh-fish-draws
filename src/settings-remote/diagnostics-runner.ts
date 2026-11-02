@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { join } from 'node:path'
 import type { ResolvedConfig } from '../config.js'
 import { FishDrawsError } from '../errors.js'
+import { PLUGIN_VERSION } from '../version.js'
 import type { DiagnosticPrepareRequest, DiagnosticRunView } from './types.js'
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,79}$/u
@@ -124,7 +125,7 @@ export class DiagnosticRunner {
     const root = join(this.configSource().storage.outputRoot, 'fish-draws', 'diagnostics', value.runId)
     await mkdir(root, { recursive: true })
     const report = {
-      schema_version: 1, plugin_version: '3.1.0', run_id: value.runId, session_id: value.sessionId, status: value.status,
+      schema_version: 1, plugin_version: PLUGIN_VERSION, run_id: value.runId, session_id: value.sessionId, status: value.status,
       route: value.route, model_profile: { id: value.profileId, name: value.profileName, sha256: value.profileHash },
       created_at_utc: value.createdAtUtc, updated_at_utc: value.updatedAtUtc,
       total_duration_ms: Math.max(0, Date.parse(value.updatedAtUtc) - Date.parse(value.createdAtUtc)),
