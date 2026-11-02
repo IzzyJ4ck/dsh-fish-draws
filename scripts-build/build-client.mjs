@@ -10,7 +10,7 @@ const external = [
   'react', 'react/jsx-runtime', '@deepseek-ai/cordis', '@deepseek-ai/dsh-api-remotes/client',
   '@deepseek-ai/dsh-api-session-controller/client', '@deepseek-ai/dsh-client-locale/client',
   '@deepseek-ai/dsh-client-ui-renderer/client', '@deepseek-ai/dsh-client-ui-settings/client',
-  '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-typert-protocol',
+  '@deepseek-ai/dsh-client-ui-primitives', 'zod',
 ]
 await build({
   config: false,
@@ -18,7 +18,7 @@ await build({
   entry: { client: resolve(root, 'src/client/index.tsx') },
   platform: 'browser',
   format: 'cjs',
-  deps: { neverBundle: external },
+  deps: { neverBundle: external, alwaysBundle: ['@deepseek-ai/dsh-typert-protocol/remote-info'] },
   outDir: temporary,
   outExtensions: () => ({ js: '.cjs' }),
   sourcemap: true,

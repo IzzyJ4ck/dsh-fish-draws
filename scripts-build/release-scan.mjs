@@ -13,6 +13,9 @@ for (const required of ['lib/index.js', 'lib/client.js', 'lib/client.js.map', 'l
 const clientBundle = await readFile(new URL('lib/client.js', root), 'utf8')
 if (!clientBundle.includes('require("react")') || !clientBundle.includes('require("@deepseek-ai/dsh-client-ui-primitives")')) throw new Error('client bundle must consume DSH shared React and UI modules')
 if (clientBundle.includes('react.production.min') || clientBundle.includes('ReactVersion')) throw new Error('client bundle unexpectedly contains a private React runtime')
+if (!clientBundle.includes('.$mount(') || !clientBundle.includes('@izzyj4ck/dsh-fish-draws')) throw new Error('client bundle does not mount its generated fish-draws Remote contribution')
+const clientInject = clientBundle.match(/const inject = \[([\s\S]*?)\];/u)?.[1] ?? ''
+if (clientInject.includes('remote.fishDrawsSettings')) throw new Error('client bundle deadlocks by injecting its own Remote namespace before mounting it')
 const hostTypert = await import(new URL('lib/typert.host.js', root))
 const remoteTypert = await import(new URL('lib/typert.remote-client.js', root))
 if (!Array.isArray(hostTypert.TYPERT?.invocations) || hostTypert.TYPERT.invocations.length !== 14) throw new Error('Host Typert settings surface is incomplete')

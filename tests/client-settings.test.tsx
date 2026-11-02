@@ -11,6 +11,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 }))
 
 import { FishDrawsSettings } from '../src/client/FishDrawsSettings.js'
+import { apply as applyClient, inject as clientInject } from '../src/client/index.js'
 import { legacyModelProfile, type ConfigValues } from '../src/config.js'
 
 function fixture(locale = 'en-US') {
@@ -61,5 +62,30 @@ describe('fish-draws settings client', () => {
     expect(screen.getByText('检查连接')).toBeTruthy()
     fireEvent.click(screen.getByText('生图模型'))
     expect(await screen.findByText('设为当前')).toBeTruthy()
+  })
+
+  it('mounts its generated Remote contribution before registering the settings section', async () => {
+    const { form } = fixture()
+    const disposers: Array<() => void | Promise<void>> = []
+    const remoteDispose = vi.fn()
+    const register = vi.fn(() => vi.fn())
+    const mount = vi.fn(async (contribution: any) => {
+      expect(contribution.package).toBe('@izzyj4ck/dsh-fish-draws')
+      expect(contribution.descriptors).toHaveLength(14)
+      return remoteDispose
+    })
+    const ctx: any = {
+      remote: { $mount: mount },
+      effect: (factory: () => void | (() => void | Promise<void>)) => { const dispose = factory(); if (typeof dispose === 'function') disposers.push(dispose) },
+      locale: { register: () => vi.fn(), getSnapshot: () => ({ active: 'en-US' }) },
+      configForms: { get: () => form, whileServed: (_names: string[], callback: () => unknown) => callback() },
+      slots: { inject: (_name: string, callback: () => unknown) => callback(), register },
+    }
+    expect(clientInject).not.toContain('remote.fishDrawsSettings')
+    await applyClient(ctx)
+    expect(mount).toHaveBeenCalledOnce()
+    expect(register).toHaveBeenCalledOnce()
+    for (const dispose of disposers.reverse()) await dispose()
+    expect(remoteDispose).toHaveBeenCalledOnce()
   })
 })

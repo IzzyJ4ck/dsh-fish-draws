@@ -7,11 +7,14 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConfigValues } from '../config.js'
 import { disposeClientStreams, FishDrawsSettings } from './FishDrawsSettings.js'
 import { dictionaries } from './locale.js'
+import { TYPERT_REMOTE } from '../settings-remote/remote-info.js'
 import './remote-types.js'
 
-export const inject = ['slots', 'configForms', 'locale', 'remote', 'remote.fishDrawsSettings']
+export const inject = ['slots', 'configForms', 'locale', 'remote']
 
-export function apply(ctx: Context): void {
+export async function apply(ctx: Context): Promise<void> {
+  const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE)
+  ctx.effect(() => disposeRemote)
   ctx.effect(() => () => disposeClientStreams())
   ctx.effect(() => (ctx.locale.register as any)('fish-draws.settings', dictionaries))
   const form = ctx.configForms.get<ConfigValues>('fish-draws')
